@@ -161,17 +161,33 @@ Invoke-SafeExport -Name 'System Summary' -ScriptBlock {
 # 2. Network Configuration
 # ------------------------------------------------------------
 Invoke-SafeExport -Name 'Network Configuration' -ScriptBlock {
-    $netCfg = Get-NetIPConfiguration
+    $netCfg = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -or $_.IPv6Address }
+
+    $networkResults = foreach ($adapter in $netCfg) {
+        [PSCustomObject]@{
+            ComputerName        = $env:COMPUTERNAME
+            InterfaceAlias      = $adapter.InterfaceAlias
+            InterfaceDescription= $adapter.InterfaceDescription
+            IPv4Address         = ($adapter.IPv4Address.IPAddress -join ', ')
+            IPv4Gateway         = ($adapter.IPv4DefaultGateway.NextHop -join ', ')
+            IPv6Address         = ($adapter.IPv6Address.IPAddress -join ', ')
+            DNSServers          = ($adapter.DnsServer.ServerAddresses -join ', ')
+            NetProfileName      = $adapter.NetProfile.Name
+            InterfaceIndex      = $adapter.InterfaceIndex
+        }
+    }
+
     $csvPath = Join-Path $ExportsRoot "$BaseName-NetworkConfig.csv"
     $txtPath = Join-Path $ReportsRoot "$BaseName-ipconfig-all.txt"
+    $routePath = Join-Path $ReportsRoot "$BaseName-route-print.txt"
 
-    $netCfg | Select-Object InterfaceAlias, InterfaceDescription, IPv4Address, IPv4DefaultGateway, DNSServer, NetAdapter |
-        Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-
+    $networkResults | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
     ipconfig /all | Out-File -FilePath $txtPath -Encoding UTF8
+    route print | Out-File -FilePath $routePath -Encoding UTF8
 
     Write-Log PASS "Saved: $csvPath"
     Write-Log PASS "Saved: $txtPath"
+    Write-Log PASS "Saved: $routePath"
 }
 
 # ------------------------------------------------------------
