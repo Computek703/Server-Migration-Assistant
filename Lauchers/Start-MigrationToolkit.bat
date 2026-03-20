@@ -1,30 +1,40 @@
-
 @echo off
 setlocal
 
-REM Get the folder this BAT is running from
 set "SCRIPT_DIR=%~dp0"
-
-REM PowerShell launcher path
 set "PS_LAUNCHER=%SCRIPT_DIR%Start-MigrationToolkit.ps1"
 
-REM Check for admin rights
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Requesting Administrator privileges...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -ArgumentList '/c cd /d ""%SCRIPT_DIR%"" ^&^& ""%~f0""' -Verb RunAs"
-    exit /b
-)
+echo ============================================
+echo Server Migration Toolkit Launcher
+echo ============================================
+echo BAT Folder   : %SCRIPT_DIR%
+echo PS Launcher  : %PS_LAUNCHER%
+echo.
 
-REM Verify the PowerShell launcher exists
 if not exist "%PS_LAUNCHER%" (
-    echo ERROR: Could not find:
+    echo ERROR: PowerShell launcher not found.
+    echo Expected:
     echo %PS_LAUNCHER%
+    echo.
     pause
     exit /b 1
 )
 
-REM Launch PowerShell menu
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_LAUNCHER%"
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Requesting Administrator privileges...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','\"\"%PS_LAUNCHER%\"\"'"
+    echo.
+    echo If a UAC prompt appeared, approve it.
+    pause
+    exit /b
+)
+
+echo Running PowerShell launcher...
+powershell -NoExit -ExecutionPolicy Bypass -File "%PS_LAUNCHER%"
+
+echo.
+echo Launcher finished.
+pause
 
 endlocal
