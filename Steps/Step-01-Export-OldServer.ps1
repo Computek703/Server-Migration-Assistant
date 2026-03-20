@@ -325,34 +325,44 @@ Invoke-SafeExport -Name 'DHCP Export' -ScriptBlock {
 }
 
 # ------------------------------------------------------------
-# 12. NTFS Permissions
+# 12. NTFS Permissions (Auto from SMB Shares)
 # ------------------------------------------------------------
 Write-Section 'NTFS Permission Export'
-$pathsInput = Read-Host 'Enter folders to export NTFS permissions for, separated by commas (or leave blank to skip)'
 
-if ($pathsInput) {
-    $paths = $pathsInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+try {
+    if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
+        $sharePaths = Get-SmbShare |
+            Where-Object {
+                $_.Special -eq $false -and
+                $_.Path -and
+                (Test-Path $_.Path)
+            } |
+            Select-Object -ExpandProperty Path -Unique
 
-    foreach ($path in $paths) {
-        if (Test-Path $path) {
-            $safeName = ($path -replace '[:\\\/ ]','_')
-            $permPath = Join-Path $ExportsRoot "$BaseName-NTFS-$safeName.txt"
+        if ($sharePaths) {
+            foreach ($path in $sharePaths) {
+                $safeName = ($path -replace '[:\\\/ ]','_')
+                $permPath = Join-Path $ExportsRoot "$BaseName-NTFS-$safeName.txt"
 
-            try {
-                icacls $path /save $permPath /t /c | Out-Null
-                Write-Log PASS "Saved NTFS permissions: $permPath"
-            }
-            catch {
-                Write-Log FAIL "Failed NTFS export for $path - $($_.Exception.Message)"
+                try {
+                    icacls $path /save $permPath /t /c | Out-Null
+                    Write-Log PASS "Saved NTFS permissions for share path: $path -> $permPath"
+                }
+                catch {
+                    Write-Log FAIL "Failed NTFS export for $path - $($_.Exception.Message)"
+                }
             }
         }
         else {
-            Write-Log WARN "Path not found: $path"
+            Write-Log WARN 'No valid non-default SMB share paths found for NTFS export.'
         }
     }
+    else {
+        Write-Log WARN 'Get-SmbShare not available. NTFS permission export skipped.'
+    }
 }
-else {
-    Write-Log INFO 'NTFS permission export skipped.'
+catch {
+    Write-Log FAIL "NTFS share-based export failed: $($_.Exception.Message)"
 }
 
 # ------------------------------------------------------------
