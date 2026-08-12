@@ -497,7 +497,7 @@ Invoke-SafeExport -Name 'Certificate Inventory' -ScriptBlock {
     else {
         Write-Log INFO 'No certificates found in LocalMachine\My.'
     }
-    Write-Log WARN 'Certificate metadata was exported. Private keys are not exported and require a separately protected backup.'
+    if ($certs.Count) { Write-Log WARN 'Certificate metadata was exported. Private keys are not exported and require a separately protected backup.' }
 }
 
 Invoke-SafeExport -Name 'IIS Inventory' -ScriptBlock {

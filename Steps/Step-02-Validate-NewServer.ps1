@@ -535,11 +535,11 @@ Write-Section 'Installed Software Spot Check'
 try {
     $oldProgramsFile = Get-LatestExportFile -Pattern '*InstalledPrograms.csv'
     if ($oldProgramsFile) {
-        $oldPrograms = Import-Csv $oldProgramsFile.FullName | Where-Object { $_.DisplayName }
+        $oldPrograms = Import-Csv $oldProgramsFile.FullName | Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName }
         $newPrograms = @(
             Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
             Get-ItemProperty 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
-        ) | Where-Object { $_.DisplayName } | Select-Object -ExpandProperty DisplayName
+        ) | Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName } | Select-Object -ExpandProperty DisplayName
 
         $importantPrograms = $oldPrograms | Select-Object -First 15
         $missingPrograms = @()

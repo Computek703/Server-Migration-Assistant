@@ -492,23 +492,55 @@ function Invoke-DomainControllerMigrationGuide {
     }
 
     $healthPath = Join-Path $ReportsRoot "$BaseName-DomainController-Health.txt"
+    $dcdiagOutput = dcdiag.exe /test:Advertising /test:Services /test:Replications /test:SysVolCheck /test:NetLogons /test:DNS /q 2>&1 | Out-String
+    $dcdiagPassed = $LASTEXITCODE -eq 0 -and [string]::IsNullOrWhiteSpace($dcdiagOutput)
+    $repSummary = repadmin.exe /replsummary 2>&1 | Out-String
+    $showRepl = repadmin.exe /showrepl 2>&1 | Out-String
+    $replicationFailures = @(Get-ADReplicationFailure -Target $ComputerName -Scope Server -ErrorAction SilentlyContinue)
+    $partners = @(Get-ADReplicationPartnerMetadata -Target $ComputerName -Scope Server -ErrorAction SilentlyContinue)
+    $partnersHealthy = $partners.Count -gt 0 -and -not @($partners | Where-Object LastReplicationResult -ne 0).Count
+    $shares = @(Get-SmbShare -Name SYSVOL,NETLOGON -ErrorAction SilentlyContinue)
+    $shareNames = @($shares.Name)
+    $requiredSharesHealthy = 'SYSVOL' -in $shareNames -and 'NETLOGON' -in $shareNames
+    $requiredServices = @('NTDS','DNS','DFSR','Netlogon')
+    $stoppedServices = @($requiredServices | Where-Object { (Get-Service -Name $_ -ErrorAction SilentlyContinue).Status -ne 'Running' })
+    try { $domainRecords = @(Resolve-DnsName -Name "_ldap._tcp.dc._msdcs.$targetDomain" -Type SRV -ErrorAction Stop) }
+    catch { $domainRecords = @() }
+    $healthPassed = $dcdiagPassed -and -not $replicationFailures.Count -and $partnersHealthy -and $requiredSharesHealthy -and -not $stoppedServices.Count -and $domainRecords.Count
+
     @(
-        '=== DCDIAG ===', (dcdiag.exe /q 2>&1 | Out-String),
-        '=== REPADMIN REPLSUMMARY ===', (repadmin.exe /replsummary 2>&1 | Out-String),
-        '=== REPADMIN SHOWREPL ===', (repadmin.exe /showrepl 2>&1 | Out-String),
-        '=== SYSVOL/NETLOGON ===', (Get-SmbShare -Name SYSVOL,NETLOGON -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String)
+        "AUTOMATED RESULT: $(if ($healthPassed) {'PASS'} else {'FAIL'})",
+        "Focused DCDIAG passed: $dcdiagPassed",
+        "Replication failure records: $($replicationFailures.Count)",
+        "Healthy replication partners: $partnersHealthy (partners=$($partners.Count))",
+        "SYSVOL and NETLOGON present: $requiredSharesHealthy",
+        "Stopped required services: $($stoppedServices -join ', ')",
+        "AD DNS SRV records: $($domainRecords.Count)",
+        '', '=== FOCUSED DCDIAG ===', $dcdiagOutput,
+        '=== REPADMIN REPLSUMMARY ===', $repSummary,
+        '=== REPADMIN SHOWREPL ===', $showRepl,
+        '=== REPLICATION PARTNERS ===', ($partners | Format-Table Server,Partner,Partition,LastReplicationSuccess,LastReplicationResult -AutoSize | Out-String),
+        '=== SYSVOL/NETLOGON ===', ($shares | Format-Table -AutoSize | Out-String)
     ) | Set-Content -LiteralPath $healthPath -Encoding UTF8
     $lines += @(
         '', 'DOMAIN CONTROLLER DETECTED',
         "Health evidence: $healthPath",
-        'Review dcdiag and repadmin until there are no unresolved replication errors.',
+        "Automated health result: $(if ($healthPassed) {'PASS'} else {'FAIL'})",
         'Only then consider transferring FSMO roles with Move-ADDirectoryServerOperationMasterRole.',
         'Do not demote the old DC until DNS, authentication, SYSVOL/NETLOGON, Global Catalog, and replication are verified.'
     )
     $lines | Set-Content -LiteralPath $guidePath -Encoding UTF8
-    Write-Log WARN "Review domain-controller health evidence before file migration: $healthPath"
-    $verified = Read-Host 'Have you reviewed dcdiag/repadmin and confirmed healthy replication? Type REPLICATION VERIFIED or NO'
-    return ($verified -ceq 'REPLICATION VERIFIED')
+    if ($healthPassed) {
+        Write-Log PASS "Automated domain-controller health and replication checks passed. Evidence: $healthPath"
+        return $true
+    }
+    Write-Log FAIL "Automated domain-controller health checks failed. Evidence: $healthPath"
+    if (-not $dcdiagPassed) { Write-Log FAIL 'One or more focused DCDIAG tests failed.' }
+    if ($replicationFailures.Count -or -not $partnersHealthy) { Write-Log FAIL 'Active Directory replication is not healthy.' }
+    if (-not $requiredSharesHealthy) { Write-Log FAIL 'SYSVOL or NETLOGON is missing.' }
+    if ($stoppedServices.Count) { Write-Log FAIL "Required services are stopped: $($stoppedServices -join ', ')" }
+    if (-not $domainRecords.Count) { Write-Log FAIL 'AD DNS SRV discovery failed.' }
+    return $false
 }
 
 function New-RobocopyScriptFromShares {
@@ -584,6 +616,9 @@ if ($changeConfirmation -cne 'YES') {
 }
 
 $results = @()
+$step2Failures = @()
+$guideFailures = @()
+$blockingFailures = @()
 
 $manifestFile = Get-LatestExportFile -Pattern '*MigrationManifest.json'
 if ($manifestFile) {
@@ -619,6 +654,12 @@ if ($manifestFile) {
         Write-Log WARN 'Domain-controller source detected. SYSVOL and NETLOGON will be excluded from share creation, permissions, and Robocopy.'
         if ($guideFailures.Count) {
             Write-Log WARN 'Domain-controller remediation completed or paused. Step 3 will not continue until Step 2 is rerun with no FAIL results.'
+            Read-Host 'Press Enter to return to launcher'
+            return
+        }
+        if (-not $roleReady) {
+            Write-Log FAIL 'Migration blocked: one or more specialized source roles still require a completed migration plan.'
+            Write-Log WARN 'Review the role installation plan before continuing with file migration.'
             Read-Host 'Press Enter to return to launcher'
             return
         }
