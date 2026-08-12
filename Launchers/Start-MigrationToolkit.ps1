@@ -61,23 +61,25 @@ try {
     :ToolkitMenu do {
         Show-Banner
 
-        Write-Host '1. Step 01 - Export Old Server'
-        Write-Host '2. Step 02 - Validate New Server'
-        Write-Host '3. Step 03 - Migrate Settings'
-        Write-Host '4. Step 04 - Post-Cutover Validation'
-        Write-Host '5. Step 05 - Decommission Old Server'
-        Write-Host '6. Exit'
+        Write-Host '1. Guided Migration Wizard (recommended)'
+        Write-Host '2. Advanced - Export Old Server'
+        Write-Host '3. Advanced - Validate New Server'
+        Write-Host '4. Advanced - Migrate Settings'
+        Write-Host '5. Advanced - Post-Cutover Validation'
+        Write-Host '6. Advanced - Decommission Old Server'
+        Write-Host '7. Exit'
         Write-Host ''
 
         $choice = Read-Host 'Select an option'
 
         switch ($choice) {
-            '1' { Invoke-StepFile -StepFile 'Step-01-Export-OldServer.ps1' }
-            '2' { Invoke-StepFile -StepFile 'Step-02-Validate-NewServer.ps1' }
-            '3' { Invoke-StepFile -StepFile 'Step-03-MigrateSettings.ps1' }
-            '4' { Invoke-StepFile -StepFile 'Step-04-PostCutover-Validation.ps1' }
-            '5' { Invoke-StepFile -StepFile 'Step-05-Decommission-OldServer.ps1' }
-            '6' { break ToolkitMenu }
+            '1' { Invoke-StepFile -StepFile 'Start-GuidedMigration.ps1' }
+            '2' { Invoke-StepFile -StepFile 'Step-01-Export-OldServer.ps1' }
+            '3' { Invoke-StepFile -StepFile 'Step-02-Validate-NewServer.ps1' }
+            '4' { Invoke-StepFile -StepFile 'Step-03-MigrateSettings.ps1' }
+            '5' { Invoke-StepFile -StepFile 'Step-04-PostCutover-Validation.ps1' }
+            '6' { Invoke-StepFile -StepFile 'Step-05-Decommission-OldServer.ps1' }
+            '7' { break ToolkitMenu }
             default {
                 Write-Host ''
                 Write-Host '[WARN] Invalid selection.' -ForegroundColor Yellow

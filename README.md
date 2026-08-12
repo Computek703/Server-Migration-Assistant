@@ -19,6 +19,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Launchers\Start-Migrat
 
 Keep the complete repository together. Reports, exports, logs, and generated copy commands are written under `Output`.
 
+Choose **Guided Migration Wizard** unless you are troubleshooting a specific advanced step. The wizard stores progress in `Output\Migration-State.json`, detects whether it is running on the old or new server, and presents one safe checkpoint at a time. Rerun it after every restart or completed checkpoint.
+
 ## Workflow
 
 1. Run Step 1 on the old server. Review the generated migration manifest to confirm what the server does, then copy the complete toolkit folder to the new server.
