@@ -397,11 +397,17 @@ function Invoke-DomainControllerMigrationGuide {
             else { Write-Log INFO 'The active IPv4 address is already static; no address conversion is needed.' }
 
             if ($sourceAddresses.Count) {
-                Write-Host "The old server IP will be used as internal DNS for joining $targetDomain." -ForegroundColor Yellow
-                if ((Read-Host 'Type SET DOMAIN DNS to apply it, or SKIP') -ceq 'SET DOMAIN DNS') {
+                $currentDomainDns = @((Get-DnsClientServerAddress -InterfaceIndex $config.InterfaceIndex -AddressFamily IPv4).ServerAddresses)
+                if (@($sourceAddresses | Where-Object { $_ -notin $currentDomainDns }).Count -eq 0) {
+                    Write-Log PASS "Domain DNS is already configured: $($currentDomainDns -join ', ')"
+                }
+                else {
+                    Write-Host "The old server IP will be used as internal DNS for joining $targetDomain." -ForegroundColor Yellow
+                    if ((Read-Host 'Type SET DOMAIN DNS to apply it, or SKIP') -ceq 'SET DOMAIN DNS') {
                     Set-DnsClientServerAddress -InterfaceIndex $config.InterfaceIndex -ServerAddresses $sourceAddresses -ErrorAction Stop
                     Clear-DnsClientCache
                     Write-Log PASS "Set DNS on $($config.InterfaceAlias) to: $($sourceAddresses -join ', ')"
+                    }
                 }
             }
             else { Write-Log FAIL 'No old-server IPv4 address was found in the export or DNS. Domain DNS was not changed.' }

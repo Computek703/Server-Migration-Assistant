@@ -135,6 +135,73 @@ if (-not (Test-IsAdmin)) {
     return
 }
 
+function Set-GuidedDomainDns {
+    param([Parameter(Mandatory)][object]$Manifest)
+
+    $targetDomain = [string]$Manifest.SourceDomain
+    $hasIdentity = $Manifest.PSObject.Properties.Name -contains 'DomainIdentity' -and $null -ne $Manifest.DomainIdentity
+    if ($hasIdentity -and $Manifest.DomainIdentity.DNSRoot) { $targetDomain = [string]$Manifest.DomainIdentity.DNSRoot }
+
+    $sourceAddresses = @()
+    if ($Manifest.PSObject.Properties.Name -contains 'SourceIPv4') {
+        $records = @($Manifest.SourceIPv4 | Where-Object IPAddress)
+        $routed = @($records | Where-Object Gateway)
+        if ($routed.Count) { $records = $routed }
+        $sourceAddresses = @($records | Select-Object -ExpandProperty IPAddress -Unique)
+    }
+    if (-not $sourceAddresses.Count) {
+        $networkFile = Get-LatestExportFile -Pattern '*NetworkConfig.csv'
+        if ($networkFile) {
+            $networkRows = @(Import-Csv -LiteralPath $networkFile.FullName | Where-Object IPv4Address)
+            $routedRows = @($networkRows | Where-Object IPv4Gateway)
+            if ($routedRows.Count) { $networkRows = $routedRows }
+            $sourceAddresses = @($networkRows | ForEach-Object { $_.IPv4Address -split ', ' } | Where-Object { $_ -and $_ -notlike '169.254.*' } | Select-Object -Unique)
+        }
+    }
+    if (-not $sourceAddresses.Count) {
+        Write-Log FAIL 'Could not determine the old server IPv4 address. DNS was not changed.'
+        return $false
+    }
+
+    $adapters = @(Get-NetIPConfiguration | Where-Object { $_.NetAdapter.Status -eq 'Up' -and $_.IPv4Address })
+    if ($adapters.Count -ne 1) {
+        Write-Log WARN "DNS auto-configuration requires one active IPv4 adapter; found $($adapters.Count)."
+        return $false
+    }
+    $adapter = $adapters[0]
+    $currentDns = @($adapter.DnsServer.ServerAddresses)
+    if (@($sourceAddresses | Where-Object { $_ -notin $currentDns }).Count -eq 0) {
+        Write-Log PASS "Domain DNS is already configured on $($adapter.InterfaceAlias): $($currentDns -join ', ')"
+    }
+    else {
+        Write-Host ''
+        Write-Host 'DOMAIN DNS REQUIRED BEFORE DOMAIN JOIN' -ForegroundColor Yellow
+        Write-Host "Target domain : $targetDomain"
+        Write-Host "Adapter       : $($adapter.InterfaceAlias)"
+        Write-Host "Current DNS   : $($currentDns -join ', ')"
+        Write-Host "Proposed DNS  : $($sourceAddresses -join ', ')"
+        $confirmation = Read-Host 'Type SET DOMAIN DNS to apply this change, or SKIP'
+        if ($confirmation -cne 'SET DOMAIN DNS') {
+            Write-Log WARN 'Domain DNS change skipped by technician.'
+            return $false
+        }
+        Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $sourceAddresses -ErrorAction Stop
+        Clear-DnsClientCache
+        Write-Log PASS "Set DNS on $($adapter.InterfaceAlias) to old server IP: $($sourceAddresses -join ', ')"
+    }
+
+    try {
+        $records = @(Resolve-DnsName -Name "_ldap._tcp.dc._msdcs.$targetDomain" -Type SRV -ErrorAction Stop)
+        if (-not $records.Count) { throw 'No domain-controller SRV records were returned.' }
+        Write-Log PASS "Verified AD DNS discovery for $targetDomain."
+        return $true
+    }
+    catch {
+        Write-Log FAIL "DNS was configured, but AD discovery failed for ${targetDomain}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 $targetConfirmation = Read-Host "Type this NEW server name to confirm the validation target: $ComputerName"
 if ($targetConfirmation -cne $ComputerName) {
     Write-Log WARN 'Target server confirmation did not match. Validation cancelled.'
@@ -161,6 +228,9 @@ if ($manifestFile) {
         $results += New-Result -Category 'Migration Package' -Check 'Manifest' -Status 'PASS' -Details "Loaded $($manifestFile.Name) with $(@($migrationManifest.Files).Count) indexed file(s)."
         if ($migrationManifest.PurposeSignals.DomainController) {
             $targetSystem = Get-CimInstance Win32_ComputerSystem
+            if (-not $targetSystem.PartOfDomain) {
+                Set-GuidedDomainDns -Manifest $migrationManifest | Out-Null
+            }
             $targetDcFeature = Get-WindowsFeature AD-Domain-Services -ErrorAction SilentlyContinue
             if (-not $targetSystem.PartOfDomain -or -not $targetDcFeature -or $targetDcFeature.InstallState -ne 'Installed') {
                 $results += New-Result -Category 'Migration Package' -Check 'Domain Controller Migration' -Status 'FAIL' -Details 'The source is a domain controller, but this target is not prepared for a supported domain-controller migration.' -Recommendation 'Stop. Join the target to the domain, install AD DS/DNS, promote it as an additional DC, verify replication, then transfer roles using supported procedures.'
