@@ -124,6 +124,20 @@ if (-not (Test-IsAdmin)) {
     return
 }
 
+Write-Host ''
+Write-Host 'SOURCE SERVER CONFIRMATION' -ForegroundColor Yellow
+Write-Host 'This step collects configuration that may contain server names, account names, paths, and network details.' -ForegroundColor Yellow
+$sourceConfirmation = Read-Host "Type this source server name to continue: $ComputerName"
+if ($sourceConfirmation -cne $ComputerName) {
+    Write-Log WARN 'Source server confirmation did not match. Export cancelled.'
+    return
+}
+$exportConfirmation = Read-Host 'Confirm this is the OLD server and begin the export? (YES/NO)'
+if ($exportConfirmation -cne 'YES') {
+    Write-Log WARN 'Export cancelled by technician.'
+    return
+}
+
 # ------------------------------------------------------------
 # 1. System Summary
 # ------------------------------------------------------------
@@ -410,11 +424,122 @@ Invoke-SafeExport -Name 'Extra Command Outputs' -ScriptBlock {
 }
 
 # ------------------------------------------------------------
+# 15. SMB Share Permissions
+# ------------------------------------------------------------
+Invoke-SafeExport -Name 'SMB Share Permissions' -ScriptBlock {
+    if ((Get-Command Get-SmbShare -ErrorAction SilentlyContinue) -and
+        (Get-Command Get-SmbShareAccess -ErrorAction SilentlyContinue)) {
+        $shareAccess = foreach ($share in (Get-SmbShare | Where-Object { -not $_.Special })) {
+            Get-SmbShareAccess -Name $share.Name -ErrorAction SilentlyContinue |
+                Select-Object @{Name='ShareName';Expression={$share.Name}}, AccountName, AccessControlType, AccessRight
+        }
+        Save-ObjectCsv -InputObject $shareAccess -Path (Join-Path $ExportsRoot "$BaseName-SharePermissions.csv")
+    }
+    else {
+        Write-Log WARN 'SMB share permission cmdlets are not available.'
+    }
+}
+
+# ------------------------------------------------------------
+# 16. Scheduled Task Definitions
+# ------------------------------------------------------------
+Invoke-SafeExport -Name 'Scheduled Task Definitions' -ScriptBlock {
+    if ((Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -and
+        (Get-Command Export-ScheduledTask -ErrorAction SilentlyContinue)) {
+        $taskRoot = Join-Path $ExportsRoot "$BaseName-ScheduledTaskXml"
+        New-Item -Path $taskRoot -ItemType Directory -Force | Out-Null
+        foreach ($task in (Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' })) {
+            $safeName = ("$($task.TaskPath)$($task.TaskName)" -replace '[\\/:*?"<>| ]','_').Trim('_')
+            if (-not $safeName) { continue }
+            try {
+                Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath |
+                    Set-Content -LiteralPath (Join-Path $taskRoot "$safeName.xml") -Encoding UTF8
+            }
+            catch { Write-Log WARN "Could not export scheduled task $($task.TaskPath)$($task.TaskName): $($_.Exception.Message)" }
+        }
+        Write-Log PASS "Saved scheduled task definitions: $taskRoot"
+    }
+}
+
+# ------------------------------------------------------------
+# 17. Firewall, Certificates, and IIS Inventory
+# ------------------------------------------------------------
+Invoke-SafeExport -Name 'Firewall Rules' -ScriptBlock {
+    if (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) {
+        $rules = Get-NetFirewallRule | Where-Object Enabled -eq 'True' |
+            Select-Object DisplayName, Name, Group, Direction, Action, Profile, Enabled
+        Save-ObjectCsv -InputObject $rules -Path (Join-Path $ExportsRoot "$BaseName-EnabledFirewallRules.csv")
+    }
+}
+
+Invoke-SafeExport -Name 'Certificate Inventory' -ScriptBlock {
+    $certs = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+        Select-Object Subject, Issuer, Thumbprint, NotBefore, NotAfter, HasPrivateKey, FriendlyName, DnsNameList
+    Save-ObjectCsv -InputObject $certs -Path (Join-Path $ExportsRoot "$BaseName-Certificates.csv")
+    Write-Log WARN 'Certificate metadata was exported. Private keys are not exported and require a separately protected backup.'
+}
+
+Invoke-SafeExport -Name 'IIS Inventory' -ScriptBlock {
+    if (Get-Module -ListAvailable WebAdministration) {
+        Import-Module WebAdministration -ErrorAction Stop
+        $sites = Get-Website | Select-Object Name, Id, State, PhysicalPath, Bindings, ApplicationPool
+        $pools = Get-ChildItem IIS:\AppPools | Select-Object Name, State, managedRuntimeVersion, managedPipelineMode, processModel
+        Save-ObjectCsv -InputObject $sites -Path (Join-Path $ExportsRoot "$BaseName-IIS-Sites.csv")
+        Save-ObjectCsv -InputObject $pools -Path (Join-Path $ExportsRoot "$BaseName-IIS-AppPools.csv")
+        & "$env:windir\System32\inetsrv\appcmd.exe" list config /xml |
+            Set-Content -LiteralPath (Join-Path $ExportsRoot "$BaseName-IIS-Config.xml") -Encoding UTF8
+    }
+    else { Write-Log INFO 'IIS is not installed or WebAdministration is unavailable.' }
+}
+
+# ------------------------------------------------------------
+# 18. Migration Manifest / Server Purpose Summary
+# ------------------------------------------------------------
+Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
+    $installedFeatures = if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+        @(Get-WindowsFeature | Where-Object InstallState -eq 'Installed' | Select-Object -ExpandProperty Name)
+    } else { @() }
+    $serverShares = if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
+        @(Get-SmbShare | Where-Object { -not $_.Special } | Select-Object Name, Path, Description)
+    } else { @() }
+    $purposeSignals = [ordered]@{
+        DomainController = [bool]($installedFeatures -contains 'AD-Domain-Services')
+        DNS              = [bool]($installedFeatures -contains 'DNS')
+        DHCP             = [bool]($installedFeatures -contains 'DHCP')
+        FileServer       = [bool]($serverShares.Count)
+        PrintServer      = [bool]($installedFeatures -contains 'Print-Server')
+        IIS              = [bool]($installedFeatures -contains 'Web-Server')
+        HyperV           = [bool]($installedFeatures -contains 'Hyper-V')
+    }
+    $files = @(Get-ChildItem -Path $ExportsRoot,$ReportsRoot -File -Recurse -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            [PSCustomObject]@{ RelativePath=$_.FullName.Substring($ProjectRoot.Length).TrimStart('\'); Length=$_.Length; SHA256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+        })
+    $manifest = [ordered]@{
+        SchemaVersion     = 1
+        ExportedAt        = (Get-Date).ToString('o')
+        SourceComputer    = $ComputerName
+        SourceDomain      = (Get-CimInstance Win32_ComputerSystem).Domain
+        InstalledFeatures = $installedFeatures
+        PurposeSignals    = $purposeSignals
+        Shares            = $serverShares
+        Files             = $files
+        Notes             = @(
+            'A new server name is supported; review name-bound applications, certificates, SPNs, scheduled tasks, and UNC paths.',
+            'Domain controllers, SQL, Exchange, failover clusters, Hyper-V, and third-party applications require product-specific migration procedures.'
+        )
+    }
+    $manifestPath = Join-Path $ExportsRoot "$BaseName-MigrationManifest.json"
+    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    Write-Log PASS "Saved migration manifest: $manifestPath"
+}
+
+# ------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------
 Write-Section 'STEP 01 COMPLETE'
 Write-Log PASS 'Old server export stage completed.'
 Write-Log INFO "Review files under: $OutputRoot"
-Write-Log INFO 'These exports can now be used to build/import on the new server.'
+Write-Log INFO 'Review the migration manifest and every WARN/FAIL before building the new server.'
 
 Read-Host 'Press Enter to return to launcher'

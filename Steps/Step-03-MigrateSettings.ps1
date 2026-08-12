@@ -169,9 +169,9 @@ function New-SmbSharesFromExport {
             continue
         }
 
-        if (-not (Test-Path $share.Path)) {
-            Write-Log WARN "Share path does not exist yet: $($share.Path)"
-            continue
+        if (-not (Test-Path -LiteralPath $share.Path)) {
+            New-Item -Path $share.Path -ItemType Directory -Force | Out-Null
+            Write-Log INFO "Created destination folder: $($share.Path)"
         }
 
         $existing = Get-SmbShare -Name $share.Name -ErrorAction SilentlyContinue
@@ -190,6 +190,32 @@ function New-SmbSharesFromExport {
     }
 }
 
+function Set-SmbSharePermissionsFromExport {
+    param([Parameter(Mandatory)][string]$PermissionsCsv)
+
+    if (-not (Get-Command Grant-SmbShareAccess -ErrorAction SilentlyContinue)) {
+        throw 'SMB share permission cmdlets are not available.'
+    }
+    foreach ($entry in (Import-Csv -LiteralPath $PermissionsCsv)) {
+        if (-not $entry.ShareName -or -not $entry.AccountName -or $entry.ShareName -match '["\r\n]') { continue }
+        if (-not (Get-SmbShare -Name $entry.ShareName -ErrorAction SilentlyContinue)) {
+            Write-Log WARN "Cannot apply access; share does not exist: $($entry.ShareName)"
+            continue
+        }
+        try {
+            if ($entry.AccessControlType -eq 'Deny') {
+                Block-SmbShareAccess -Name $entry.ShareName -AccountName $entry.AccountName -Force | Out-Null
+            }
+            elseif ($entry.AccessRight -in @('Full','Change','Read')) {
+                Grant-SmbShareAccess -Name $entry.ShareName -AccountName $entry.AccountName -AccessRight $entry.AccessRight -Force | Out-Null
+            }
+            Write-Log PASS "Applied $($entry.AccessControlType) $($entry.AccessRight) for $($entry.AccountName) on $($entry.ShareName)"
+        }
+        catch { Write-Log FAIL "Share access failed for $($entry.ShareName)/$($entry.AccountName): $($_.Exception.Message)" }
+    }
+    Write-Log WARN 'Review effective share permissions manually; additional pre-existing entries are not removed.'
+}
+
 function New-RobocopyScriptFromShares {
     param(
         [Parameter(Mandatory)][string]$SharesCsv,
@@ -201,13 +227,10 @@ function New-RobocopyScriptFromShares {
     }
 
     $shares = Import-Csv $SharesCsv
-    $scriptPath = Join-Path $ReportsRoot "$BaseName-RobocopyCommands.cmd"
-    $lines = @()
-
-    $lines += "@echo off"
-    $lines += "REM Generated Robocopy commands"
-    $lines += "REM Review paths before running"
-    $lines += ""
+    $initialPath = Join-Path $ReportsRoot "$BaseName-Robocopy-Initial.cmd"
+    $finalPath = Join-Path $ReportsRoot "$BaseName-Robocopy-Final.cmd"
+    $initialLines = @('@echo off','setlocal','REM Initial copy: safe to repeat while the source remains online.','')
+    $finalLines = @('@echo off','setlocal','REM FINAL DELTA: stop writes to source shares first.','REM /MIR can delete destination files absent from the source. Review all paths.','')
 
     foreach ($share in $shares) {
         if (-not $share.Name -or -not $share.Path) { continue }
@@ -218,14 +241,19 @@ function New-RobocopyScriptFromShares {
 
         $source = "\\$OldServerName\$($share.Name)"
         $dest   = $share.Path
-        $log    = Join-Path $ReportsRoot ("Robocopy-" + $share.Name + ".log")
-
-        $line = 'robocopy "{0}" "{1}" /E /COPYALL /R:2 /W:2 /MT:16 /TEE /LOG+:"{2}"' -f $source, $dest, $log
-        $lines += $line
+        $initialLog = Join-Path $ReportsRoot ("Robocopy-Initial-" + $share.Name + ".log")
+        $finalLog = Join-Path $ReportsRoot ("Robocopy-Final-" + $share.Name + ".log")
+        $initialLines += 'robocopy "{0}" "{1}" /E /COPYALL /DCOPY:DAT /ZB /SECFIX /TIMFIX /XJ /R:2 /W:5 /MT:16 /TEE /LOG+:"{2}"' -f $source, $dest, $initialLog
+        $initialLines += 'if errorlevel 8 exit /b %errorlevel%'
+        $finalLines += 'robocopy "{0}" "{1}" /MIR /COPYALL /DCOPY:DAT /ZB /SECFIX /TIMFIX /XJ /R:2 /W:5 /MT:16 /TEE /LOG+:"{2}"' -f $source, $dest, $finalLog
+        $finalLines += 'if errorlevel 8 exit /b %errorlevel%'
     }
 
-    $lines | Out-File -FilePath $scriptPath -Encoding ASCII
-    return $scriptPath
+    $initialLines += @('exit /b 0','endlocal')
+    $finalLines += @('exit /b 0','endlocal')
+    $initialLines | Set-Content -LiteralPath $initialPath -Encoding ASCII
+    $finalLines | Set-Content -LiteralPath $finalPath -Encoding ASCII
+    return [PSCustomObject]@{ Initial=$initialPath; Final=$finalPath }
 }
 
 # ------------------------------------------------------------
@@ -241,6 +269,18 @@ Write-Log INFO "Log File     : $LogFile"
 if (-not (Test-IsAdmin)) {
     Write-Log FAIL 'This script must be run as Administrator.'
     Read-Host 'Press Enter to continue'
+    return
+}
+
+Write-Host 'Step 3 can change DHCP, DNS, and SMB configuration on this server.' -ForegroundColor Yellow
+$targetConfirmation = Read-Host "Type this NEW server name to continue: $ComputerName"
+if ($targetConfirmation -cne $ComputerName) {
+    Write-Log WARN 'Target server confirmation did not match. Migration cancelled.'
+    return
+}
+$changeConfirmation = Read-Host 'Confirm you reviewed Step 2 and want to enter the migration prompts? (YES/NO)'
+if ($changeConfirmation -cne 'YES') {
+    Write-Log WARN 'Migration cancelled by technician.'
     return
 }
 
@@ -375,9 +415,10 @@ try {
     if ($sharesFile) {
         $doRobocopyScript = Read-Host "Generate Robocopy command file from $($sharesFile.Name)? (Y/N)"
         if (($doRobocopyScript -match '^(Y|y)$') -and $OldServerName) {
-            $robocopyScript = New-RobocopyScriptFromShares -SharesCsv $sharesFile.FullName -OldServerName $OldServerName
-            $results += New-Result -Category 'File Services' -Action 'Generate Robocopy Commands' -Status 'PASS' -Details "Created Robocopy script: $(Split-Path $robocopyScript -Leaf)"
-            Write-Log PASS "Robocopy script created: $robocopyScript"
+            $robocopyScripts = New-RobocopyScriptFromShares -SharesCsv $sharesFile.FullName -OldServerName $OldServerName
+            $results += New-Result -Category 'File Services' -Action 'Generate Robocopy Commands' -Status 'PASS' -Details 'Created initial and final-delta Robocopy scripts.'
+            Write-Log PASS "Initial copy script: $($robocopyScripts.Initial)"
+            Write-Log WARN "Final /MIR script (review before use): $($robocopyScripts.Final)"
         }
         elseif (-not $OldServerName) {
             $results += New-Result -Category 'File Services' -Action 'Generate Robocopy Commands' -Status 'WARN' -Details 'Skipped because no valid old server name was supplied.'
@@ -395,7 +436,25 @@ catch {
 }
 
 # ------------------------------------------------------------
-# 6. Notes / Manual Items
+# 6. Apply SMB Share Permissions
+# ------------------------------------------------------------
+Write-Section 'SMB Share Permissions'
+try {
+    $permissionsFile = Get-LatestExportFile -Pattern '*SharePermissions.csv'
+    if ($permissionsFile) {
+        $applyPermissions = Read-Host "Apply exported SMB share permissions from $($permissionsFile.Name)? (Y/N)"
+        if ($applyPermissions -match '^(Y|y)$') {
+            Set-SmbSharePermissionsFromExport -PermissionsCsv $permissionsFile.FullName
+            $results += New-Result -Category 'File Services' -Action 'Apply Share Permissions' -Status 'PASS' -Details 'Processed exported SMB share permissions.'
+        }
+        else { $results += New-Result -Category 'File Services' -Action 'Apply Share Permissions' -Status 'INFO' -Details 'Skipped by technician.' }
+    }
+    else { $results += New-Result -Category 'File Services' -Action 'Apply Share Permissions' -Status 'WARN' -Details 'No share-permission export found.' }
+}
+catch { $results += New-Result -Category 'File Services' -Action 'Apply Share Permissions' -Status 'FAIL' -Details $_.Exception.Message }
+
+# ------------------------------------------------------------
+# 7. Notes / Manual Items
 # ------------------------------------------------------------
 Write-Section 'Manual Follow-Up Items'
 

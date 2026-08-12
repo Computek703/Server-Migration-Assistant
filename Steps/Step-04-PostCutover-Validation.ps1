@@ -17,6 +17,23 @@ function Add-Check([string]$Category,[string]$Check,[string]$Status,[string]$Det
 }
 
 Write-Host 'STEP 04 - POST-CUTOVER VALIDATION' -ForegroundColor Cyan
+$validationConfirmation = Read-Host "Type VALIDATE to check the replacement server $env:COMPUTERNAME"
+if ($validationConfirmation -cne 'VALIDATE') {
+    Write-ToolkitLog -Level 'WARN' -Message 'Post-cutover validation cancelled by technician.' -LogFile $logFile
+    return
+}
+
+$manifestFile = Get-ChildItem -LiteralPath $paths.Exports -Filter '*MigrationManifest.json' -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$manifest = $null
+if ($manifestFile) {
+    try {
+        $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
+        Add-Check 'Migration Package' 'Target name' $(if ($manifest.SourceComputer -ine $env:COMPUTERNAME) {'PASS'} else {'FAIL'}) "Source=$($manifest.SourceComputer); Target=$env:COMPUTERNAME"
+    }
+    catch { Add-Check 'Migration Package' 'Manifest' 'FAIL' $_.Exception.Message }
+}
+else { Add-Check 'Migration Package' 'Manifest' 'FAIL' 'No Step 1 migration manifest found.' }
 
 try {
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
@@ -55,6 +72,20 @@ if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
         Add-Check 'File Services' $share.Name $(if (Test-Path -LiteralPath $share.Path) {'PASS'} else {'FAIL'}) "Path=$($share.Path)"
     }
     if (-not $shares.Count) { Add-Check 'File Services' 'SMB shares' 'WARN' 'No non-system shares found.' }
+    if ($manifest) {
+        foreach ($expected in @($manifest.Shares)) {
+            $actual = $shares | Where-Object Name -eq $expected.Name | Select-Object -First 1
+            if (-not $actual) { Add-Check 'File Services' "Expected share $($expected.Name)" 'FAIL' 'Share is missing.'; continue }
+            Add-Check 'File Services' "Expected share $($expected.Name) path" $(if ($actual.Path -eq $expected.Path) {'PASS'} else {'FAIL'}) "Expected=$($expected.Path); Actual=$($actual.Path)"
+        }
+    }
+}
+
+if ($manifest -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
+    $actualFeatures = @(Get-WindowsFeature | Where-Object InstallState -eq 'Installed' | Select-Object -ExpandProperty Name)
+    foreach ($feature in @($manifest.InstalledFeatures)) {
+        Add-Check 'Roles' $feature $(if ($actualFeatures -contains $feature) {'PASS'} else {'FAIL'}) $(if ($actualFeatures -contains $feature) {'Installed'} else {'Missing from replacement server'})
+    }
 }
 
 try {

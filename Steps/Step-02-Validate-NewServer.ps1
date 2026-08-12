@@ -135,7 +135,49 @@ if (-not (Test-IsAdmin)) {
     return
 }
 
+$targetConfirmation = Read-Host "Type this NEW server name to confirm the validation target: $ComputerName"
+if ($targetConfirmation -cne $ComputerName) {
+    Write-Log WARN 'Target server confirmation did not match. Validation cancelled.'
+    return
+}
+
 $results = @()
+
+# ------------------------------------------------------------
+# Migration package identity / completeness
+# ------------------------------------------------------------
+Write-Section 'Migration Package'
+$manifestFile = Get-LatestExportFile -Pattern '*MigrationManifest.json'
+$migrationManifest = $null
+if ($manifestFile) {
+    try {
+        $migrationManifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
+        if ($migrationManifest.SourceComputer -ieq $ComputerName) {
+            $results += New-Result -Category 'Migration Package' -Check 'Server Identity' -Status 'FAIL' -Details 'This appears to be the source server, not the differently named replacement.' -Recommendation 'Run Step 2 on the new server.'
+        }
+        else {
+            $results += New-Result -Category 'Migration Package' -Check 'Server Identity' -Status 'PASS' -Details "Source=$($migrationManifest.SourceComputer); Target=$ComputerName"
+        }
+        $results += New-Result -Category 'Migration Package' -Check 'Manifest' -Status 'PASS' -Details "Loaded $($manifestFile.Name) with $(@($migrationManifest.Files).Count) indexed file(s)."
+        foreach ($entry in @($migrationManifest.Files)) {
+            $candidate = Join-Path $ProjectRoot $entry.RelativePath
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                $results += New-Result -Category 'Migration Package' -Check 'Export Integrity' -Status 'FAIL' -Details "Missing: $($entry.RelativePath)" -Recommendation 'Copy the complete Output folder from the source server again.'
+                continue
+            }
+            $actualHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+            if ($actualHash -ne $entry.SHA256) {
+                $results += New-Result -Category 'Migration Package' -Check 'Export Integrity' -Status 'FAIL' -Details "Hash mismatch: $($entry.RelativePath)" -Recommendation 'Replace the damaged or stale export file.'
+            }
+        }
+    }
+    catch {
+        $results += New-Result -Category 'Migration Package' -Check 'Manifest' -Status 'FAIL' -Details $_.Exception.Message -Recommendation 'Rerun Step 1 and copy the complete Output folder.'
+    }
+}
+else {
+    $results += New-Result -Category 'Migration Package' -Check 'Manifest' -Status 'FAIL' -Details 'No migration manifest was found.' -Recommendation 'Run the updated Step 1 on the old server before continuing.'
+}
 
 # ------------------------------------------------------------
 # 1. Basic OS / Name

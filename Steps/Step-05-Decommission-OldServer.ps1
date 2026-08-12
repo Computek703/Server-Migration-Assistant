@@ -28,6 +28,17 @@ if ($latestValidation) {
     $checks['Post-cutover validation has no unresolved FAIL results'] = -not ($validation.Status -contains 'FAIL')
 }
 
+foreach ($item in @($checks.Keys | Where-Object { $_ -ne 'Post-cutover validation has no unresolved FAIL results' })) {
+    $answer = Read-Host "$item? (YES/NO)"
+    $checks[$item] = ($answer -ceq 'YES')
+}
+
+$allChecksPassed = -not ($checks.Values -contains $false)
+if ($allChecksPassed) {
+    $finalConfirmation = Read-Host "All gates passed. Type the old server name $env:COMPUTERNAME to mark the plan READY"
+    $allChecksPassed = ($finalConfirmation -ceq $env:COMPUTERNAME)
+}
+
 $inventory = @()
 foreach ($name in @('DNS','DHCPServer','LanmanServer')) {
     $service = Get-Service -Name $name -ErrorAction SilentlyContinue
@@ -40,6 +51,7 @@ $lines = @(
     "Generated: $(Get-Date -Format s)",
     '', 'PRE-FLIGHT CHECKLIST'
 )
+$lines += "Overall readiness: $(if ($allChecksPassed) {'READY FOR APPROVED DECOMMISSION CHANGE'} else {'NOT READY'})"
 foreach ($item in $checks.GetEnumerator()) { $lines += "[$(if ($item.Value) {'x'} else {' '})] $($item.Key)" }
 $lines += '', 'CURRENT ROLE SERVICES', ($inventory | ForEach-Object { "- $_" })
 $lines += '', 'CURRENT NON-SYSTEM SHARES', ($shares | ForEach-Object { "- $_" })
@@ -54,6 +66,10 @@ $lines | Set-Content -LiteralPath $reportFile -Encoding UTF8
 Write-ToolkitLog -Level 'PASS' -Message "Saved audit and decommission plan: $reportFile" -LogFile $logFile
 
 if ($Execute) {
+    if (-not $allChecksPassed) {
+        Write-ToolkitLog -Level 'FAIL' -Message 'Execute mode refused because one or more decommission gates did not pass.' -LogFile $logFile
+        return
+    }
     Write-ToolkitLog -Level 'WARN' -Message 'Execute mode requested, but destructive decommission actions are intentionally not automated.' -LogFile $logFile
     Write-Host 'Use the generated plan in an approved change window. Domain demotion, role removal, and data deletion require environment-specific procedures.' -ForegroundColor Yellow
 }
