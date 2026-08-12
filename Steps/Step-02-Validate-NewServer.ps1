@@ -103,7 +103,7 @@ function Get-LatestExportFile {
         [Parameter(Mandatory)][string]$Pattern
     )
 
-    Get-ChildItem -Path $ExportsRoot -Filter $Pattern -File -ErrorAction SilentlyContinue |
+    Get-ChildItem -Path $ExportsRoot,$ReportsRoot -Filter $Pattern -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
 }
@@ -166,7 +166,7 @@ if ($manifestFile) {
                 $results += New-Result -Category 'Migration Package' -Check 'Domain Controller Migration' -Status 'FAIL' -Details 'The source is a domain controller, but this target is not prepared for a supported domain-controller migration.' -Recommendation 'Stop. Join the target to the domain, install AD DS/DNS, promote it as an additional DC, verify replication, then transfer roles using supported procedures.'
             }
             else {
-                $results += New-Result -Category 'Migration Package' -Check 'Domain Controller Migration' -Status 'WARN' -Details 'Source is a domain controller. SYSVOL, NETLOGON, AD DS, and DNS must replicate through domain-controller procedures—not file/share copying.'
+                $results += New-Result -Category 'Migration Package' -Check 'Domain Controller Migration' -Status 'WARN' -Details 'Source is a domain controller. SYSVOL, NETLOGON, AD DS, and DNS must replicate through domain-controller procedures - not file/share copying.'
             }
         }
         foreach ($entry in @($migrationManifest.Files)) {

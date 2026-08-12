@@ -264,6 +264,10 @@ Invoke-SafeExport -Name 'SMB Shares' -ScriptBlock {
 # 7. Local Administrators / Groups
 # ------------------------------------------------------------
 Invoke-SafeExport -Name 'Local Groups and Admins' -ScriptBlock {
+    if ((Get-CimInstance Win32_ComputerSystem).DomainRole -ge 4) {
+        Write-Log INFO 'Domain controller detected; local users and groups do not exist. Skipping local Administrators export.'
+        return
+    }
     if (Get-Command Get-LocalGroup -ErrorAction SilentlyContinue) {
         $groupsPath = Join-Path $ExportsRoot "$BaseName-LocalGroups.csv"
         $adminsPath = Join-Path $ExportsRoot "$BaseName-LocalAdministrators.csv"
@@ -364,6 +368,7 @@ try {
         $sharePaths = Get-SmbShare |
             Where-Object {
                 $_.Special -eq $false -and
+                $_.Name -notin @('NETLOGON','SYSVOL') -and
                 $_.Path -and
                 (Test-Path $_.Path)
             } |
@@ -473,9 +478,14 @@ Invoke-SafeExport -Name 'Firewall Rules' -ScriptBlock {
 }
 
 Invoke-SafeExport -Name 'Certificate Inventory' -ScriptBlock {
-    $certs = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
-        Select-Object Subject, Issuer, Thumbprint, NotBefore, NotAfter, HasPrivateKey, FriendlyName, DnsNameList
-    Save-ObjectCsv -InputObject $certs -Path (Join-Path $ExportsRoot "$BaseName-Certificates.csv")
+    $certs = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+        Select-Object Subject, Issuer, Thumbprint, NotBefore, NotAfter, HasPrivateKey, FriendlyName, DnsNameList)
+    if ($certs.Count) {
+        Save-ObjectCsv -InputObject $certs -Path (Join-Path $ExportsRoot "$BaseName-Certificates.csv")
+    }
+    else {
+        Write-Log INFO 'No certificates found in LocalMachine\My.'
+    }
     Write-Log WARN 'Certificate metadata was exported. Private keys are not exported and require a separately protected backup.'
 }
 

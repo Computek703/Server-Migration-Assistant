@@ -253,7 +253,7 @@ function Invoke-DomainControllerMigrationGuide {
         }
         $lines += @(
             '', 'NEXT CHECKPOINT: JOIN THE EXISTING DOMAIN',
-            "Confirm the target uses the existing AD DNS server—not public DNS—then run:",
+            "Confirm the target uses the existing AD DNS server - not public DNS - then run:",
             "Add-Computer -DomainName '$targetDomain' -Credential (Get-Credential) -Restart",
             'After restart, sign in with a domain administrative account and rerun Step 2.'
         )
