@@ -90,7 +90,7 @@ function Save-Results {
     $txtPath = Join-Path $ReportsRoot "$BaseName-ValidationSummary.txt"
 
     $Results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-    $Results | ConvertTo-Json -Depth 6 | Out-File -Path $jsonPath -Encoding UTF8
+    $Results | ConvertTo-Json -Depth 6 | Out-File -FilePath $jsonPath -Encoding UTF8
     $Results | Format-Table -AutoSize | Out-String | Out-File -FilePath $txtPath -Encoding UTF8
 
     Write-Log PASS "Saved: $csvPath"
@@ -159,6 +159,16 @@ if ($manifestFile) {
             $results += New-Result -Category 'Migration Package' -Check 'Server Identity' -Status 'PASS' -Details "Source=$($migrationManifest.SourceComputer); Target=$ComputerName"
         }
         $results += New-Result -Category 'Migration Package' -Check 'Manifest' -Status 'PASS' -Details "Loaded $($manifestFile.Name) with $(@($migrationManifest.Files).Count) indexed file(s)."
+        if ($migrationManifest.PurposeSignals.DomainController) {
+            $targetSystem = Get-CimInstance Win32_ComputerSystem
+            $targetDcFeature = Get-WindowsFeature AD-Domain-Services -ErrorAction SilentlyContinue
+            if (-not $targetSystem.PartOfDomain -or -not $targetDcFeature -or $targetDcFeature.InstallState -ne 'Installed') {
+                $results += New-Result -Category 'Migration Package' -Check 'Domain Controller Migration' -Status 'FAIL' -Details 'The source is a domain controller, but this target is not prepared for a supported domain-controller migration.' -Recommendation 'Stop. Join the target to the domain, install AD DS/DNS, promote it as an additional DC, verify replication, then transfer roles using supported procedures.'
+            }
+            else {
+                $results += New-Result -Category 'Migration Package' -Check 'Domain Controller Migration' -Status 'WARN' -Details 'Source is a domain controller. SYSVOL, NETLOGON, AD DS, and DNS must replicate through domain-controller procedures—not file/share copying.'
+            }
+        }
         foreach ($entry in @($migrationManifest.Files)) {
             $candidate = Join-Path $ProjectRoot $entry.RelativePath
             if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {

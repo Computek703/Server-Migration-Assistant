@@ -90,7 +90,7 @@ function Save-Results {
     $txtPath  = Join-Path $ReportsRoot "$BaseName-MigrationSummary.txt"
 
     $Results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-    $Results | ConvertTo-Json -Depth 6 | Out-File -Path $jsonPath -Encoding UTF8
+    $Results | ConvertTo-Json -Depth 6 | Out-File -FilePath $jsonPath -Encoding UTF8
     $Results | Format-Table -AutoSize | Out-String | Out-File -FilePath $txtPath -Encoding UTF8
 
     Write-Log PASS "Saved: $csvPath"
@@ -169,6 +169,11 @@ function New-SmbSharesFromExport {
             continue
         }
 
+        if ($share.Name -in @('NETLOGON','SYSVOL')) {
+            Write-Log WARN "Skipping protected domain-controller share: $($share.Name). Use AD replication."
+            continue
+        }
+
         if (-not (Test-Path -LiteralPath $share.Path)) {
             New-Item -Path $share.Path -ItemType Directory -Force | Out-Null
             Write-Log INFO "Created destination folder: $($share.Path)"
@@ -198,6 +203,10 @@ function Set-SmbSharePermissionsFromExport {
     }
     foreach ($entry in (Import-Csv -LiteralPath $PermissionsCsv)) {
         if (-not $entry.ShareName -or -not $entry.AccountName -or $entry.ShareName -match '["\r\n]') { continue }
+        if ($entry.ShareName -in @('NETLOGON','SYSVOL')) {
+            Write-Log WARN "Skipping protected domain-controller share permission: $($entry.ShareName)"
+            continue
+        }
         if (-not (Get-SmbShare -Name $entry.ShareName -ErrorAction SilentlyContinue)) {
             Write-Log WARN "Cannot apply access; share does not exist: $($entry.ShareName)"
             continue
@@ -214,6 +223,90 @@ function Set-SmbSharePermissionsFromExport {
         catch { Write-Log FAIL "Share access failed for $($entry.ShareName)/$($entry.AccountName): $($_.Exception.Message)" }
     }
     Write-Log WARN 'Review effective share permissions manually; additional pre-existing entries are not removed.'
+}
+
+function Invoke-DomainControllerMigrationGuide {
+    param([Parameter(Mandatory)][object]$Manifest)
+
+    $guidePath = Join-Path $ReportsRoot "$BaseName-DomainController-Guide.txt"
+    $system = Get-CimInstance Win32_ComputerSystem
+    $adds = Get-WindowsFeature AD-Domain-Services -ErrorAction SilentlyContinue
+    $dns = Get-WindowsFeature DNS -ErrorAction SilentlyContinue
+    $targetDomain = [string]$Manifest.SourceDomain
+    $lines = @(
+        'DOMAIN CONTROLLER MIGRATION GUIDE',
+        "Source DC: $($Manifest.SourceComputer)",
+        "Target: $ComputerName",
+        "Domain: $targetDomain",
+        "Target domain joined: $($system.PartOfDomain)",
+        "AD DS installed: $($adds.InstallState -eq 'Installed')",
+        "DNS installed: $($dns.InstallState -eq 'Installed')",
+        '',
+        'Important: never create or copy SYSVOL/NETLOGON manually. They must appear through AD replication.'
+    )
+
+    if (-not $system.PartOfDomain) {
+        Write-Log WARN "The replacement must join $targetDomain before domain-controller promotion."
+        $install = Read-Host 'Install AD DS/DNS prerequisites and management tools now? Type INSTALL or SKIP'
+        if ($install -ceq 'INSTALL') {
+            Install-WindowsFeature AD-Domain-Services,DNS -IncludeManagementTools -ErrorAction Stop | Out-String | ForEach-Object { Write-Log INFO $_.Trim() }
+        }
+        $lines += @(
+            '', 'NEXT CHECKPOINT: JOIN THE EXISTING DOMAIN',
+            "Confirm the target uses the existing AD DNS server—not public DNS—then run:",
+            "Add-Computer -DomainName '$targetDomain' -Credential (Get-Credential) -Restart",
+            'After restart, sign in with a domain administrative account and rerun Step 2.'
+        )
+        $lines | Set-Content -LiteralPath $guidePath -Encoding UTF8
+        Write-Log WARN "Guide saved: $guidePath"
+        return $false
+    }
+
+    if (-not $adds -or $adds.InstallState -ne 'Installed' -or -not $dns -or $dns.InstallState -ne 'Installed') {
+        $install = Read-Host 'Install AD DS/DNS prerequisites and management tools now? Type INSTALL or SKIP'
+        if ($install -ceq 'INSTALL') {
+            Install-WindowsFeature AD-Domain-Services,DNS -IncludeManagementTools -ErrorAction Stop | Out-String | ForEach-Object { Write-Log INFO $_.Trim() }
+        }
+        $lines += @('', 'NEXT CHECKPOINT: REBOOT IF REQUESTED, THEN RERUN STEP 2.')
+        $lines | Set-Content -LiteralPath $guidePath -Encoding UTF8
+        Write-Log WARN "Guide saved: $guidePath"
+        return $false
+    }
+
+    $isDc = (Get-Service NTDS -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters')
+    if (-not $isDc) {
+        $lines += @(
+            '', 'NEXT CHECKPOINT: PROMOTE AS AN ADDITIONAL DOMAIN CONTROLLER',
+            'Verify DNS points to an existing healthy domain controller, then run in an elevated PowerShell session:',
+            '$credential = Get-Credential',
+            '$dsrmPassword = Read-Host ''DSRM password'' -AsSecureString',
+            "Install-ADDSDomainController -DomainName '$targetDomain' -InstallDns -Credential `$credential -SafeModeAdministratorPassword `$dsrmPassword",
+            'The promotion normally restarts the server. Rerun Step 2 afterward.'
+        )
+        $lines | Set-Content -LiteralPath $guidePath -Encoding UTF8
+        Write-Log WARN 'AD DS is installed, but this server is not yet a domain controller. Promotion is intentionally not executed automatically.'
+        Write-Log WARN "Guide saved: $guidePath"
+        return $false
+    }
+
+    $healthPath = Join-Path $ReportsRoot "$BaseName-DomainController-Health.txt"
+    @(
+        '=== DCDIAG ===', (dcdiag.exe /q 2>&1 | Out-String),
+        '=== REPADMIN REPLSUMMARY ===', (repadmin.exe /replsummary 2>&1 | Out-String),
+        '=== REPADMIN SHOWREPL ===', (repadmin.exe /showrepl 2>&1 | Out-String),
+        '=== SYSVOL/NETLOGON ===', (Get-SmbShare -Name SYSVOL,NETLOGON -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String)
+    ) | Set-Content -LiteralPath $healthPath -Encoding UTF8
+    $lines += @(
+        '', 'DOMAIN CONTROLLER DETECTED',
+        "Health evidence: $healthPath",
+        'Review dcdiag and repadmin until there are no unresolved replication errors.',
+        'Only then consider transferring FSMO roles with Move-ADDirectoryServerOperationMasterRole.',
+        'Do not demote the old DC until DNS, authentication, SYSVOL/NETLOGON, Global Catalog, and replication are verified.'
+    )
+    $lines | Set-Content -LiteralPath $guidePath -Encoding UTF8
+    Write-Log WARN "Review domain-controller health evidence before file migration: $healthPath"
+    $verified = Read-Host 'Have you reviewed dcdiag/repadmin and confirmed healthy replication? Type REPLICATION VERIFIED or NO'
+    return ($verified -ceq 'REPLICATION VERIFIED')
 }
 
 function New-RobocopyScriptFromShares {
@@ -234,6 +327,10 @@ function New-RobocopyScriptFromShares {
 
     foreach ($share in $shares) {
         if (-not $share.Name -or -not $share.Path) { continue }
+        if ($share.Name -in @('NETLOGON','SYSVOL')) {
+            Write-Log WARN "Skipping protected domain-controller share in Robocopy generation: $($share.Name)"
+            continue
+        }
         if ($share.Name -match '["\r\n\\/:*?<>|]' -or $share.Path -match '["\r\n]') {
             Write-Log WARN "Skipping unsafe share entry: $($share.Name)"
             continue
@@ -285,6 +382,19 @@ if ($changeConfirmation -cne 'YES') {
 }
 
 $results = @()
+
+$manifestFile = Get-LatestExportFile -Pattern '*MigrationManifest.json'
+if ($manifestFile) {
+    $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
+    if ($manifest.PurposeSignals.DomainController) {
+        if (-not (Invoke-DomainControllerMigrationGuide -Manifest $manifest)) {
+            Write-Log WARN 'Migration paused at the domain-controller checkpoint. Complete the guide and rerun Step 2.'
+            Read-Host 'Press Enter to return to launcher'
+            return
+        }
+        Write-Log WARN 'Domain-controller source detected. SYSVOL and NETLOGON will be excluded from share creation, permissions, and Robocopy.'
+    }
+}
 
 Write-Section 'Migration Source Info'
 $OldServerName = Read-Host 'Enter the OLD server name used for Robocopy/share references'
