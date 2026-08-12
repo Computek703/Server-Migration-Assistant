@@ -43,6 +43,15 @@ After successful post-cutover validation, the rollback monitoring period, and a 
 
 ## Safety notes
 
+### Result severity
+
+- **FAIL:** A required export, identity, network, runtime role, data/share operation, integrity check, or post-cutover check is unsafe or impossible. The wizard blocks progression.
+- **WARN:** A technician decision, optional component, pending update/restart, manual review, or nonessential capability needs attention but is not automatically fatal.
+- **PASS:** The check completed and its required condition was met.
+- **INFO:** Guidance or a technician-selected skip with no claim that the capability was migrated.
+
+Step 1 records its failure count in the manifest. Step 2 rejects any export package created with Step 1 failures. Missing runtime roles block post-cutover completion; missing management consoles such as RSAT or PowerShell ISE are warnings.
+
 - Step 3 can change DHCP, DNS, and SMB configuration. Each change requires an interactive confirmation.
 - Generated Robocopy commands must be reviewed before execution. They use `/COPYALL` and can transfer security metadata.
 - Step 5 is deliberately non-destructive. Decommissioning must follow the environment's approved change, retention, and rollback procedures.

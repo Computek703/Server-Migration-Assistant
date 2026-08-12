@@ -226,6 +226,9 @@ if ($manifestFile) {
             $results += New-Result -Category 'Migration Package' -Check 'Server Identity' -Status 'PASS' -Details "Source=$($migrationManifest.SourceComputer); Target=$ComputerName"
         }
         $results += New-Result -Category 'Migration Package' -Check 'Manifest' -Status 'PASS' -Details "Loaded $($manifestFile.Name) with $(@($migrationManifest.Files).Count) indexed file(s)."
+        if ($migrationManifest.PSObject.Properties.Name -contains 'ExportHealth' -and -not $migrationManifest.ExportHealth.Complete) {
+            $results += New-Result -Category 'Migration Package' -Check 'Step 1 Export Health' -Status 'FAIL' -Details "Old-server export recorded $($migrationManifest.ExportHealth.FailureCount) failure(s)." -Recommendation 'Return to the old server, correct Step 1 failures, and create a fresh export package.'
+        }
         if ($migrationManifest.PurposeSignals.DomainController) {
             $targetSystem = Get-CimInstance Win32_ComputerSystem
             if (-not $targetSystem.PartOfDomain) {

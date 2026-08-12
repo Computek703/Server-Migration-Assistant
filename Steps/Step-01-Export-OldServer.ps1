@@ -23,6 +23,8 @@ $TimeStamp   = Get-Date -Format 'yyyyMMdd_HHmmss'
 $LogFile     = Join-Path $LogsRoot "Step-01-Export-OldServer_$TimeStamp.log"
 $ComputerName = $env:COMPUTERNAME
 $BaseName     = "$ComputerName-Step01-$TimeStamp"
+$script:FailureCount = 0
+$script:WarningCount = 0
 
 # ------------------------------------------------------------
 # Helpers
@@ -41,6 +43,8 @@ function Write-Log {
         'FAIL' { 'Red' }
     }
 
+    if ($Level -eq 'FAIL') { $script:FailureCount++ }
+    elseif ($Level -eq 'WARN') { $script:WarningCount++ }
     $line = "[{0}] {1}" -f $Level, $Message
     Write-Host $line -ForegroundColor $color
     Add-Content -Path $LogFile -Value "$(Get-Date -Format s) $line"
@@ -100,8 +104,10 @@ function Invoke-SafeExport {
 
     try {
         Write-Log INFO "Starting export: $Name"
+        $failuresBefore = $script:FailureCount
         & $ScriptBlock
-        Write-Log PASS "Completed export: $Name"
+        if ($script:FailureCount -eq $failuresBefore) { Write-Log PASS "Completed export: $Name" }
+        else { Write-Log WARN "Completed export with one or more failures: $Name" }
     }
     catch {
         Write-Log FAIL "$Name failed: $($_.Exception.Message)"
@@ -550,6 +556,7 @@ Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
         } else { $null }
         InstalledFeatures = $installedFeatures
         PurposeSignals    = $purposeSignals
+        ExportHealth      = [ordered]@{ FailureCount=$script:FailureCount; WarningCount=$script:WarningCount; Complete=($script:FailureCount -eq 0) }
         Shares            = $serverShares
         Files             = $files
         Notes             = @(
@@ -566,7 +573,12 @@ Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
 # Summary
 # ------------------------------------------------------------
 Write-Section 'STEP 01 COMPLETE'
-Write-Log PASS 'Old server export stage completed.'
+if ($script:FailureCount -eq 0) {
+    Write-Log PASS 'Old server export package completed without blocking failures.'
+}
+else {
+    Write-Log FAIL "Old server export package is incomplete: $script:FailureCount failure(s). Do not continue until Step 1 is rerun successfully."
+}
 Write-Log INFO "Review files under: $OutputRoot"
 Write-Log INFO 'Review the migration manifest and every WARN/FAIL before building the new server.'
 

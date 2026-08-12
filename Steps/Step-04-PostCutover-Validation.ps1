@@ -83,8 +83,13 @@ if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
 
 if ($manifest -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
     $actualFeatures = @(Get-WindowsFeature | Where-Object InstallState -eq 'Installed' | Select-Object -ExpandProperty Name)
+    $optionalFeaturePatterns = @('^RSAT','^GPMC$','^PowerShell-ISE$','-Tools$','-PowerShell$')
     foreach ($feature in @($manifest.InstalledFeatures)) {
-        Add-Check 'Roles' $feature $(if ($actualFeatures -contains $feature) {'PASS'} else {'FAIL'}) $(if ($actualFeatures -contains $feature) {'Installed'} else {'Missing from replacement server'})
+        $installed = $actualFeatures -contains $feature
+        $optional = [bool]($optionalFeaturePatterns | Where-Object { $feature -match $_ })
+        $status = if ($installed) { 'PASS' } elseif ($optional) { 'WARN' } else { 'FAIL' }
+        $details = if ($installed) { 'Installed' } elseif ($optional) { 'Optional management tool is missing' } else { 'Required runtime role/feature is missing from replacement server' }
+        Add-Check 'Roles' $feature $status $details
     }
 }
 
