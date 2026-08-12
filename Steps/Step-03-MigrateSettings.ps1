@@ -139,7 +139,14 @@ function Set-DnsForwardersFromExport {
 
     foreach ($fwd in $forwarders) {
         if ($fwd.IPAddress) {
-            $ips += $fwd.IPAddress
+            foreach ($candidate in @($fwd.IPAddress -split '[,;\s]+')) {
+                if (-not $candidate) { continue }
+                $parsed = $null
+                if ([System.Net.IPAddress]::TryParse($candidate,[ref]$parsed) -and $parsed.AddressFamily -eq 'InterNetwork') {
+                    $ips += $parsed.IPAddressToString
+                }
+                else { Write-Log WARN "Skipping invalid DNS forwarder value: $candidate" }
+            }
         }
     }
 
@@ -580,6 +587,27 @@ $results = @()
 
 $manifestFile = Get-LatestExportFile -Pattern '*MigrationManifest.json'
 if ($manifestFile) {
+    $latestStep2 = Get-ChildItem -Path $ReportsRoot -Filter "$ComputerName-Step02-*-ValidationResults.csv" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+    if (-not $latestStep2 -or $latestStep2.LastWriteTime -lt $manifestFile.LastWriteTime -or $latestStep2.LastWriteTime -lt $lastBoot) {
+        Write-Log FAIL 'Step 3 blocked: a fresh Step 2 validation is required after the latest export and server restart.'
+        Write-Log WARN 'Return to the wizard or Troubleshooting Tools, run Step 2, and resolve every FAIL result.'
+        Read-Host 'Press Enter to return to launcher'
+        return
+    }
+    $step2Failures = @(Import-Csv -LiteralPath $latestStep2.FullName | Where-Object Status -eq 'FAIL')
+    if ($step2Failures.Count) {
+        $guideFailures = @($step2Failures | Where-Object Check -eq 'Domain Controller Migration')
+        $blockingFailures = @($step2Failures | Where-Object Check -ne 'Domain Controller Migration')
+        if ($blockingFailures.Count) {
+            Write-Log FAIL "Step 3 blocked: the latest Step 2 validation contains $($blockingFailures.Count) non-remediable failure(s)."
+            $blockingFailures | Format-Table Category,Check,Details,Recommendation -Wrap
+            Read-Host 'Press Enter to return to launcher'
+            return
+        }
+        if ($guideFailures.Count) { Write-Log WARN 'Step 3 is entering guided domain-controller remediation only. Run Step 2 again afterward.' }
+    }
     $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
     $roleReady = Invoke-RoleInstallationGuide -Manifest $manifest
     if ($manifest.PurposeSignals.DomainController) {
@@ -589,6 +617,11 @@ if ($manifestFile) {
             return
         }
         Write-Log WARN 'Domain-controller source detected. SYSVOL and NETLOGON will be excluded from share creation, permissions, and Robocopy.'
+        if ($guideFailures.Count) {
+            Write-Log WARN 'Domain-controller remediation completed or paused. Step 3 will not continue until Step 2 is rerun with no FAIL results.'
+            Read-Host 'Press Enter to return to launcher'
+            return
+        }
     }
     elseif (-not $roleReady) {
         Write-Log WARN 'Migration paused because specialized or unavailable roles require review. See the role installation plan.'

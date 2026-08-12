@@ -182,10 +182,10 @@ Invoke-SafeExport -Name 'Network Configuration' -ScriptBlock {
             ComputerName        = $env:COMPUTERNAME
             InterfaceAlias      = $adapter.InterfaceAlias
             InterfaceDescription= $adapter.InterfaceDescription
-            IPv4Address         = ($adapter.IPv4Address.IPAddress -join ', ')
-            IPv4Gateway         = ($adapter.IPv4DefaultGateway.NextHop -join ', ')
-            IPv6Address         = ($adapter.IPv6Address.IPAddress -join ', ')
-            DNSServers          = ($adapter.DnsServer.ServerAddresses -join ', ')
+            IPv4Address         = (@($adapter.IPv4Address | ForEach-Object { $_.IPAddress }) -join ', ')
+            IPv4Gateway         = (@($adapter.IPv4DefaultGateway | ForEach-Object { $_.NextHop }) -join ', ')
+            IPv6Address         = (@($adapter.IPv6Address | ForEach-Object { $_.IPAddress }) -join ', ')
+            DNSServers          = (@($adapter.DnsServer.ServerAddresses) -join ', ')
             NetProfileName      = $adapter.NetProfile.Name
             InterfaceIndex      = $adapter.InterfaceIndex
         }
@@ -225,7 +225,7 @@ Invoke-SafeExport -Name 'Installed Programs' -ScriptBlock {
     $programs = @(
         Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
         Get-ItemProperty 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
-    ) | Where-Object { $_.DisplayName } |
+    ) | Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName } |
         Select-Object DisplayName, DisplayVersion, Publisher, InstallDate |
         Sort-Object DisplayName -Unique
 
@@ -334,8 +334,13 @@ Invoke-SafeExport -Name 'DNS Inventory' -ScriptBlock {
         Save-ObjectCsv -InputObject $zones -Path $zonesPath
 
         if (Get-Command Get-DnsServerForwarder -ErrorAction SilentlyContinue) {
-            $forwarders = Get-DnsServerForwarder |
-                Select-Object IPAddress, Timeout, UseRootHint
+            $forwarders = Get-DnsServerForwarder | ForEach-Object {
+                [PSCustomObject]@{
+                    IPAddress   = (@($_.IPAddress | ForEach-Object { $_.IPAddressToString }) -join ', ')
+                    Timeout     = $_.Timeout
+                    UseRootHint = $_.UseRootHint
+                }
+            }
             Save-ObjectCsv -InputObject $forwarders -Path $fwdPath
         }
     }

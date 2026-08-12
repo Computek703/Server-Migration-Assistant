@@ -202,10 +202,13 @@ if ($special.Count) {
 else { Write-Host 'No high-risk Windows role was identified by the Step 1 manifest.' -ForegroundColor Green }
 
 $step2 = Get-LatestFile -Folder $paths.Reports -Pattern "$computerName-Step02-*-ValidationResults.csv"
-if (-not $step2) {
+$lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+$step2IsFresh = $step2 -and $step2.LastWriteTime -ge $manifestFile.LastWriteTime -and $step2.LastWriteTime -ge $lastBoot
+if (-not $step2IsFresh) {
     Show-Heading 'CHECKPOINT 2 OF 7 - VALIDATE THE NEW SERVER'
+    if ($step2) { Write-Host 'The existing Step 2 report predates the latest export or server restart and cannot be reused.' -ForegroundColor Yellow }
     Invoke-ToolkitStep 'Step-02-Validate-NewServer.ps1'
-    Stop-Wizard 'Review the Step 2 results, correct failures, and rerun Guided Migration.'
+    Stop-Wizard 'Step 2 has finished. Correct failures, restart if requested, then rerun Start or Resume Migration.'
     return
 }
 
