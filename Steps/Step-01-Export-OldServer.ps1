@@ -530,6 +530,15 @@ Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
         ExportedAt        = (Get-Date).ToString('o')
         SourceComputer    = $ComputerName
         SourceDomain      = (Get-CimInstance Win32_ComputerSystem).Domain
+        SourceIPv4        = @(
+            Get-NetIPConfiguration | Where-Object { $_.NetAdapter.Status -eq 'Up' } | ForEach-Object {
+                foreach ($address in @($_.IPv4Address)) {
+                    if ($address.IPAddress -and $address.IPAddress -notlike '169.254.*' -and $address.IPAddress -ne '127.0.0.1') {
+                        [ordered]@{ InterfaceAlias=$_.InterfaceAlias; IPAddress=$address.IPAddress; PrefixLength=$address.PrefixLength; Gateway=(@($_.IPv4DefaultGateway.NextHop) -join ','); DnsServers=@($_.DnsServer.ServerAddresses) }
+                    }
+                }
+            }
+        )
         DomainIdentity    = if (Get-Command Get-ADDomain -ErrorAction SilentlyContinue) {
             $adDomain = Get-ADDomain -ErrorAction Stop
             [ordered]@{ DNSRoot=$adDomain.DNSRoot; NetBIOSName=$adDomain.NetBIOSName; DomainSID=[string]$adDomain.DomainSID; ObjectGUID=[string]$adDomain.ObjectGUID }

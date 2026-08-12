@@ -25,6 +25,8 @@ When the replacement is missing Windows roles or features, the toolkit creates a
 
 For a domain-controller replacement, the wizard checks whether the existing domain can be discovered through internal DNS. After the technician types `JOIN DOMAIN` and supplies authorized credentials, it joins the replacement to the existing domain and restarts. Domain-controller promotion remains a separate checkpoint after the restart.
 
+Before domain join, the network checkpoint shows the new server's current IPv4 address, whether it came from DHCP, its prefix, gateway, and DNS servers. The technician may keep DHCP, convert the current lease to static after confirming it is reserved/excluded, or enter a planned static address. The old server's exported IPv4 address can be applied as internal DNS after typed confirmation. Network changes remain skippable.
+
 Each migration is bound to the exact DNS domain—and, when available, its immutable domain GUID—from the old-server export. The technician must type that domain name exactly before the join. A mismatch between the export, saved flash-drive state, current membership, or typed domain stops the workflow; the toolkit never selects a nearby domain automatically.
 
 After successful post-cutover validation, the rollback monitoring period, and a fully passed decommission checklist, the wizard offers **Archive and Reset**. It requires the exact phrase `ARCHIVE AND RESET TOOLKIT`, creates a timestamped ZIP and SHA-256 checksum under `MigrationArchives`, verifies the archive, clears only the active `Output` contents, and recreates clean output folders for the next migration.

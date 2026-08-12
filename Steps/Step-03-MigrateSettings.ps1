@@ -327,6 +327,88 @@ function Invoke-DomainControllerMigrationGuide {
     )
 
     if (-not $system.PartOfDomain) {
+        $activeConfigs = @(Get-NetIPConfiguration | Where-Object { $_.NetAdapter.Status -eq 'Up' -and $_.IPv4Address })
+        if ($activeConfigs.Count -ne 1) {
+            Write-Log WARN "Expected one active IPv4 adapter but found $($activeConfigs.Count). Network configuration will be skipped."
+        }
+        else {
+            $config = $activeConfigs[0]
+            $address = Get-NetIPAddress -InterfaceIndex $config.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop |
+                Where-Object { $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1
+            $gateway = @($config.IPv4DefaultGateway.NextHop) | Select-Object -First 1
+            $sourceAddresses = @()
+            if ($Manifest.PSObject.Properties.Name -contains 'SourceIPv4') {
+                $sourceRecords = @($Manifest.SourceIPv4 | Where-Object IPAddress)
+                $routedSourceRecords = @($sourceRecords | Where-Object Gateway)
+                if ($routedSourceRecords.Count) { $sourceRecords = $routedSourceRecords }
+                $sourceAddresses = @($sourceRecords | Select-Object -ExpandProperty IPAddress -Unique)
+            }
+            if (-not $sourceAddresses.Count) {
+                try {
+                    $sourceAddresses = @([System.Net.Dns]::GetHostAddresses([string]$Manifest.SourceComputer) |
+                        Where-Object AddressFamily -eq 'InterNetwork' | ForEach-Object IPAddressToString)
+                } catch { }
+            }
+
+            Write-Host ''
+            Write-Host 'NEW SERVER NETWORK CHECKPOINT' -ForegroundColor Cyan
+            Write-Host "Adapter       : $($config.InterfaceAlias)"
+            Write-Host "Current IPv4  : $($address.IPAddress)/$($address.PrefixLength)"
+            Write-Host "Address source: $($address.PrefixOrigin)"
+            Write-Host "Gateway       : $gateway"
+            Write-Host "Current DNS   : $(@($config.DnsServer.ServerAddresses) -join ', ')"
+            Write-Host "Old server IP : $($sourceAddresses -join ', ')" -ForegroundColor Yellow
+
+            if ($address.PrefixOrigin -eq 'Dhcp') {
+                Write-Host 'The current address was received from DHCP.' -ForegroundColor Yellow
+                Write-Host '1. Keep DHCP (skip static configuration)'
+                Write-Host '2. Convert the current DHCP address to static'
+                Write-Host '3. Enter a different planned static address'
+                $networkChoice = Read-Host 'Select 1, 2, or 3'
+                if ($networkChoice -eq '2') {
+                    $leaseSafety = Read-Host 'Confirm this address is reserved for this server or excluded from the DHCP pool. Type DHCP ADDRESS SAFE or CANCEL'
+                    if ($leaseSafety -ceq 'DHCP ADDRESS SAFE') {
+                        $proposedIp = $address.IPAddress; $proposedPrefix = $address.PrefixLength; $proposedGateway = $gateway
+                    }
+                }
+                elseif ($networkChoice -eq '3') {
+                    $proposedIp = Read-Host 'Enter the planned IPv4 address'
+                    $proposedPrefix = Read-Host 'Enter the prefix length (for example 24)'
+                    $proposedGateway = Read-Host 'Enter the default gateway'
+                }
+
+                if ($proposedIp) {
+                    $parsedIp = $null; $parsedGateway = $null
+                    if (-not [System.Net.IPAddress]::TryParse($proposedIp,[ref]$parsedIp) -or $parsedIp.AddressFamily -ne 'InterNetwork') { throw "Invalid IPv4 address: $proposedIp" }
+                    if (-not [System.Net.IPAddress]::TryParse($proposedGateway,[ref]$parsedGateway) -or $parsedGateway.AddressFamily -ne 'InterNetwork') { throw "Invalid gateway: $proposedGateway" }
+                    $prefixNumber = 0
+                    if (-not [int]::TryParse([string]$proposedPrefix,[ref]$prefixNumber) -or $prefixNumber -lt 1 -or $prefixNumber -gt 32) { throw "Invalid prefix length: $proposedPrefix" }
+                    if ($proposedIp -in $sourceAddresses) { throw 'The new server cannot use the old server IP while both servers are online.' }
+                    Write-Host "Proposed static configuration: $proposedIp/$prefixNumber, gateway $proposedGateway" -ForegroundColor Yellow
+                    if ((Read-Host 'Type APPLY STATIC NETWORK to make this change, or SKIP') -ceq 'APPLY STATIC NETWORK') {
+                        Set-NetIPInterface -InterfaceIndex $config.InterfaceIndex -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop
+                        Get-NetIPAddress -InterfaceIndex $config.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                            Where-Object PrefixOrigin -eq 'Dhcp' | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+                        New-NetIPAddress -InterfaceIndex $config.InterfaceIndex -IPAddress $proposedIp -PrefixLength $prefixNumber -DefaultGateway $proposedGateway -ErrorAction Stop | Out-Null
+                        Write-Log PASS "Applied static IPv4 configuration to $($config.InterfaceAlias): $proposedIp/$prefixNumber"
+                    }
+                }
+            }
+            else { Write-Log INFO 'The active IPv4 address is already static; no address conversion is needed.' }
+
+            if ($sourceAddresses.Count) {
+                Write-Host "The old server IP will be used as internal DNS for joining $targetDomain." -ForegroundColor Yellow
+                if ((Read-Host 'Type SET DOMAIN DNS to apply it, or SKIP') -ceq 'SET DOMAIN DNS') {
+                    Set-DnsClientServerAddress -InterfaceIndex $config.InterfaceIndex -ServerAddresses $sourceAddresses -ErrorAction Stop
+                    Clear-DnsClientCache
+                    Write-Log PASS "Set DNS on $($config.InterfaceAlias) to: $($sourceAddresses -join ', ')"
+                }
+            }
+            else { Write-Log FAIL 'No old-server IPv4 address was found in the export or DNS. Domain DNS was not changed.' }
+        }
+    }
+
+    if (-not $system.PartOfDomain) {
         Write-Log WARN "The replacement must join $targetDomain before domain-controller promotion."
         $install = Read-Host 'Install AD DS/DNS prerequisites and management tools now? Type INSTALL or SKIP'
         if ($install -ceq 'INSTALL') {
