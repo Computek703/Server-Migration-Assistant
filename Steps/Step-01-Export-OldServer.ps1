@@ -530,6 +530,10 @@ Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
         ExportedAt        = (Get-Date).ToString('o')
         SourceComputer    = $ComputerName
         SourceDomain      = (Get-CimInstance Win32_ComputerSystem).Domain
+        DomainIdentity    = if (Get-Command Get-ADDomain -ErrorAction SilentlyContinue) {
+            $adDomain = Get-ADDomain -ErrorAction Stop
+            [ordered]@{ DNSRoot=$adDomain.DNSRoot; NetBIOSName=$adDomain.NetBIOSName; DomainSID=[string]$adDomain.DomainSID; ObjectGUID=[string]$adDomain.ObjectGUID }
+        } else { $null }
         InstalledFeatures = $installedFeatures
         PurposeSignals    = $purposeSignals
         Shares            = $serverShares

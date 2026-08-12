@@ -225,6 +225,85 @@ function Set-SmbSharePermissionsFromExport {
     Write-Log WARN 'Review effective share permissions manually; additional pre-existing entries are not removed.'
 }
 
+function Invoke-RoleInstallationGuide {
+    param([Parameter(Mandatory)][object]$Manifest)
+
+    if (-not (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
+        Write-Log WARN 'Server Manager cmdlets are unavailable. Install roles manually with Server Manager.'
+        return $false
+    }
+
+    $available = @(Get-WindowsFeature)
+    $installedNames = @($available | Where-Object InstallState -eq 'Installed' | Select-Object -ExpandProperty Name)
+    $missing = @($Manifest.InstalledFeatures | Where-Object { $_ -and $_ -notin $installedNames })
+    if (-not $missing.Count) {
+        Write-Log PASS 'All exported Windows roles and features are installed on this server.'
+        return $true
+    }
+
+    $specialPatterns = @(
+        '^AD-Domain-Services$','^ADCS-','^Hyper-V$','^Failover-Clustering$','^FS-DFS-',
+        '^DHCP$','^DNS$','^Web-','^NPAS$','^RemoteAccess$','^RDS-','^WDS$','^UpdateServices'
+    )
+    $optionalPatterns = @('^RSAT','^GPMC$','^PowerShell-ISE$','-Tools$','-PowerShell$')
+    $safe = @(); $special = @(); $optional = @(); $unavailable = @()
+
+    foreach ($name in $missing) {
+        $feature = $available | Where-Object Name -eq $name | Select-Object -First 1
+        if (-not $feature) { $unavailable += $name; continue }
+        if ($specialPatterns | Where-Object { $name -match $_ }) { $special += $feature; continue }
+        if ($optionalPatterns | Where-Object { $name -match $_ }) { $optional += $feature; continue }
+        $safe += $feature
+    }
+
+    $planPath = Join-Path $ReportsRoot "$BaseName-RoleInstallationPlan.txt"
+    $lines = @(
+        'NEW SERVER ROLE INSTALLATION PLAN',
+        "Source: $($Manifest.SourceComputer)", "Target: $ComputerName", "Generated: $(Get-Date -Format s)", ''
+    )
+    foreach ($group in @(
+        @{Title='SAFE AUTOMATIC INSTALL CANDIDATES';Items=$safe},
+        @{Title='SPECIALIZED - USE GUIDED OR PRODUCT-SPECIFIC MIGRATION';Items=$special},
+        @{Title='OPTIONAL MANAGEMENT TOOLS';Items=$optional}
+    )) {
+        $lines += $group.Title
+        if (@($group.Items).Count) {
+            $lines += @($group.Items | ForEach-Object { "- $($_.DisplayName) [$($_.Name)]" })
+        } else { $lines += '- None' }
+        $lines += ''
+    }
+    $lines += 'UNAVAILABLE ON THIS OPERATING SYSTEM'
+    $lines += $(if ($unavailable.Count) { @($unavailable | ForEach-Object { "- $_" }) } else { '- None' })
+    $lines += '', 'Do not blindly install specialized roles. Their configuration and data require supported migration procedures.'
+    $lines | Set-Content -LiteralPath $planPath -Encoding UTF8
+
+    Write-Host ''
+    Write-Host 'Missing Windows roles and features:' -ForegroundColor Yellow
+    foreach ($feature in $safe) { Write-Host "  AUTO: $($feature.DisplayName) [$($feature.Name)]" -ForegroundColor Green }
+    foreach ($feature in $special) { Write-Host "  GUIDED: $($feature.DisplayName) [$($feature.Name)]" -ForegroundColor Yellow }
+    foreach ($feature in $optional) { Write-Host "  OPTIONAL: $($feature.DisplayName) [$($feature.Name)]" }
+    foreach ($name in $unavailable) { Write-Host "  UNAVAILABLE: $name" -ForegroundColor Red }
+    Write-Log INFO "Role installation plan saved: $planPath"
+
+    if ($safe.Count) {
+        $answer = Read-Host 'Type INSTALL SAFE ROLES to install the green AUTO items, or SKIP'
+        if ($answer -ceq 'INSTALL SAFE ROLES') {
+            $result = Install-WindowsFeature -Name @($safe.Name) -IncludeManagementTools -ErrorAction Stop
+            $result | Format-Table DisplayName,Name,InstallState -AutoSize | Out-String | ForEach-Object { Write-Log INFO $_.Trim() }
+            if ($result.RestartNeeded -eq 'Yes') {
+                Write-Log WARN 'A restart is required. Restart the server, then rerun Step 2 and the wizard.'
+                return $false
+            }
+        }
+    }
+    if ($optional.Count -and (Read-Host 'Install the optional management tools listed above? Type INSTALL TOOLS or SKIP') -ceq 'INSTALL TOOLS') {
+        $toolResult = Install-WindowsFeature -Name @($optional.Name) -ErrorAction Stop
+        if ($toolResult.RestartNeeded -eq 'Yes') { Write-Log WARN 'A restart is required after management-tool installation.'; return $false }
+    }
+
+    return (-not $special.Count -and -not $unavailable.Count)
+}
+
 function Invoke-DomainControllerMigrationGuide {
     param([Parameter(Mandatory)][object]$Manifest)
 
@@ -233,6 +312,8 @@ function Invoke-DomainControllerMigrationGuide {
     $adds = Get-WindowsFeature AD-Domain-Services -ErrorAction SilentlyContinue
     $dns = Get-WindowsFeature DNS -ErrorAction SilentlyContinue
     $targetDomain = [string]$Manifest.SourceDomain
+    $hasDomainIdentity = $Manifest.PSObject.Properties.Name -contains 'DomainIdentity' -and $null -ne $Manifest.DomainIdentity
+    if ($hasDomainIdentity -and $Manifest.DomainIdentity.DNSRoot) { $targetDomain = [string]$Manifest.DomainIdentity.DNSRoot }
     $lines = @(
         'DOMAIN CONTROLLER MIGRATION GUIDE',
         "Source DC: $($Manifest.SourceComputer)",
@@ -251,6 +332,16 @@ function Invoke-DomainControllerMigrationGuide {
         if ($install -ceq 'INSTALL') {
             Install-WindowsFeature AD-Domain-Services,DNS -IncludeManagementTools -ErrorAction Stop | Out-String | ForEach-Object { Write-Log INFO $_.Trim() }
         }
+        $domainDns = @()
+        try {
+            $domainDns = @(Resolve-DnsName -Name "_ldap._tcp.dc._msdcs.$targetDomain" -Type SRV -ErrorAction Stop)
+            Write-Log PASS "The existing AD domain is discoverable through DNS: $targetDomain"
+        }
+        catch {
+            Write-Log FAIL "The AD domain cannot be discovered through DNS: $targetDomain"
+            Write-Log WARN 'Set the active network adapter DNS server to the existing domain controller IP, then rerun this step.'
+        }
+
         $lines += @(
             '', 'NEXT CHECKPOINT: JOIN THE EXISTING DOMAIN',
             "Confirm the target uses the existing AD DNS server - not public DNS - then run:",
@@ -259,6 +350,22 @@ function Invoke-DomainControllerMigrationGuide {
         )
         $lines | Set-Content -LiteralPath $guidePath -Encoding UTF8
         Write-Log WARN "Guide saved: $guidePath"
+        if ($domainDns.Count) {
+            Write-Host "TARGET DOMAIN: $targetDomain" -ForegroundColor Yellow
+            if ($hasDomainIdentity -and $Manifest.DomainIdentity.ObjectGUID) { Write-Host "DOMAIN ID: $($Manifest.DomainIdentity.ObjectGUID)" }
+            $domainNameConfirmation = Read-Host "Type the exact domain name $targetDomain to authorize the join, or SKIP"
+            if ($domainNameConfirmation -ceq $targetDomain) {
+                $joinAnswer = Read-Host 'Type JOIN DOMAIN to execute the join and restart, or SKIP'
+            }
+            if ($domainNameConfirmation -ceq $targetDomain -and $joinAnswer -ceq 'JOIN DOMAIN') {
+                Write-Host 'Enter an account permitted to join computers to the existing domain.' -ForegroundColor Yellow
+                $credential = Get-Credential -Message "Credentials for joining $targetDomain"
+                if (-not $credential) { Write-Log WARN 'No credentials supplied. Domain join cancelled.'; return $false }
+                Add-Computer -DomainName $targetDomain -Credential $credential -ErrorAction Stop
+                Write-Log PASS "Domain join succeeded. Restarting this server; rerun the wizard after signing in."
+                Restart-Computer -Force
+            }
+        }
         return $false
     }
 
@@ -386,6 +493,7 @@ $results = @()
 $manifestFile = Get-LatestExportFile -Pattern '*MigrationManifest.json'
 if ($manifestFile) {
     $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
+    $roleReady = Invoke-RoleInstallationGuide -Manifest $manifest
     if ($manifest.PurposeSignals.DomainController) {
         if (-not (Invoke-DomainControllerMigrationGuide -Manifest $manifest)) {
             Write-Log WARN 'Migration paused at the domain-controller checkpoint. Complete the guide and rerun Step 2.'
@@ -393,6 +501,11 @@ if ($manifestFile) {
             return
         }
         Write-Log WARN 'Domain-controller source detected. SYSVOL and NETLOGON will be excluded from share creation, permissions, and Robocopy.'
+    }
+    elseif (-not $roleReady) {
+        Write-Log WARN 'Migration paused because specialized or unavailable roles require review. See the role installation plan.'
+        Read-Host 'Press Enter to return to launcher'
+        return
     }
 }
 

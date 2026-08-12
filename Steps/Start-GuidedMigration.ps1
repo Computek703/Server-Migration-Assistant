@@ -22,7 +22,7 @@ function Get-LatestFile([string]$Folder,[string]$Pattern) {
 
 function New-State {
     [PSCustomObject]@{
-        SchemaVersion=1; SourceServer=''; TargetServer=''; Phase='Discovery';
+        SchemaVersion=1; SourceServer=''; TargetServer=''; IntendedDomain=''; DomainGuid=''; Phase='Discovery';
         InitialCopyVerified=$false; CutoverApproved=$false; FinalCopyVerified=$false;
         PostCutoverVerified=$false; LastUpdated=(Get-Date).ToString('o')
     }
@@ -30,7 +30,16 @@ function New-State {
 
 function Read-State {
     if (-not (Test-Path -LiteralPath $statePath)) { return (New-State) }
-    try { return (Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json) }
+    try {
+        $loaded = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $defaults = New-State
+        foreach ($property in $defaults.PSObject.Properties) {
+            if ($loaded.PSObject.Properties.Name -notcontains $property.Name) {
+                $loaded | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+            }
+        }
+        return $loaded
+    }
     catch { Write-Host 'The migration state file is unreadable. A new state will be created.' -ForegroundColor Yellow; return (New-State) }
 }
 
@@ -51,6 +60,46 @@ function Stop-Wizard([string]$Message) {
     Write-Host "NEXT ACTION: $Message" -ForegroundColor Yellow
     Write-Host "Progress file: $statePath"
     Read-Host 'Press Enter to return to the launcher'
+}
+
+function Complete-MigrationCleanup {
+    param([Parameter(Mandatory)][object]$State)
+
+    Show-Heading 'FINAL ARCHIVE AND CLEANUP'
+    Write-Host 'This removes the active migration package only after creating and verifying an archive.' -ForegroundColor Yellow
+    Write-Host "Source: $($State.SourceServer)  Target: $($State.TargetServer)  Domain: $($State.IntendedDomain)"
+    $confirmation = Read-Host 'Type ARCHIVE AND RESET TOOLKIT to close this migration, or SKIP'
+    if ($confirmation -cne 'ARCHIVE AND RESET TOOLKIT') { return $false }
+
+    $archiveRoot = Join-Path $projectRoot 'MigrationArchives'
+    if (-not (Test-Path -LiteralPath $archiveRoot)) { New-Item -Path $archiveRoot -ItemType Directory -Force | Out-Null }
+    $safeSource = ($State.SourceServer -replace '[^A-Za-z0-9_.-]','_')
+    $safeTarget = ($State.TargetServer -replace '[^A-Za-z0-9_.-]','_')
+    $archivePath = Join-Path $archiveRoot ("Migration-{0}-to-{1}-{2}.zip" -f $safeSource,$safeTarget,(Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $outputItems = @(Get-ChildItem -LiteralPath $paths.Output -Force -ErrorAction Stop)
+    if (-not $outputItems.Count) { Write-Host 'Output is already empty; cleanup cancelled.' -ForegroundColor Red; return $false }
+
+    Compress-Archive -LiteralPath @($outputItems.FullName) -DestinationPath $archivePath -CompressionLevel Optimal -ErrorAction Stop
+    $archive = Get-Item -LiteralPath $archivePath -ErrorAction Stop
+    if ($archive.Length -le 0) { throw "Archive verification failed: $archivePath" }
+    $hash = Get-FileHash -LiteralPath $archivePath -Algorithm SHA256
+    $hashFile = "$archivePath.sha256.txt"
+    "SHA256  $($hash.Hash)  $($archive.Name)" | Set-Content -LiteralPath $hashFile -Encoding ASCII
+
+    $resolvedOutput = (Resolve-Path -LiteralPath $paths.Output).Path
+    $expectedOutput = (Join-Path $projectRoot 'Output')
+    if ($resolvedOutput -ne $expectedOutput) { throw "Refusing cleanup of unexpected path: $resolvedOutput" }
+    foreach ($item in $outputItems) {
+        if (-not $item.FullName.StartsWith("$resolvedOutput\", [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing cleanup outside Output: $($item.FullName)"
+        }
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force
+    }
+    Initialize-ToolkitOutput -ProjectRoot $projectRoot | Out-Null
+    Write-Host "Migration archived: $archivePath" -ForegroundColor Green
+    Write-Host "Checksum saved : $hashFile" -ForegroundColor Green
+    Write-Host 'The toolkit is reset and ready for the next migration.' -ForegroundColor Green
+    return $true
 }
 
 Clear-Host
@@ -81,12 +130,43 @@ if (-not $manifest) {
 }
 
 $state.SourceServer = [string]$manifest.SourceComputer
+$hasDomainIdentity = $manifest.PSObject.Properties.Name -contains 'DomainIdentity' -and $null -ne $manifest.DomainIdentity
+$exportDomain = if ($hasDomainIdentity -and $manifest.DomainIdentity.DNSRoot) { [string]$manifest.DomainIdentity.DNSRoot } else { [string]$manifest.SourceDomain }
+$exportGuid = if ($hasDomainIdentity -and $manifest.DomainIdentity.ObjectGUID) { [string]$manifest.DomainIdentity.ObjectGUID } else { '' }
+if (-not $state.IntendedDomain) {
+    Show-Heading 'CONFIRM THE MIGRATION DOMAIN'
+    Write-Host "The old-server export identifies this domain: $exportDomain" -ForegroundColor Yellow
+    Write-Host 'The toolkit will save this choice on the flash drive and refuse a different domain later.'
+    $domainConfirmation = Read-Host "Type the exact domain name $exportDomain to bind this migration"
+    if ($domainConfirmation -cne $exportDomain) {
+        Stop-Wizard 'Domain confirmation did not match the old-server export. No domain action was taken.'
+        return
+    }
+    $state.IntendedDomain = $exportDomain
+    $state.DomainGuid = $exportGuid
+    Save-State $state
+}
+elseif ($state.IntendedDomain -ine $exportDomain -or ($state.DomainGuid -and $exportGuid -and $state.DomainGuid -ine $exportGuid)) {
+    Write-Host 'The saved migration domain does not match the current export package.' -ForegroundColor Red
+    Write-Host "Saved domain : $($state.IntendedDomain) / $($state.DomainGuid)"
+    Write-Host "Export domain: $exportDomain / $exportGuid"
+    Stop-Wizard 'Stop and use the correct flash drive/export package. The migration state will not be changed automatically.'
+    return
+}
 if ($computerName -ieq $state.SourceServer) {
     Show-Heading 'OLD SERVER CHECKPOINT'
     if ($state.PostCutoverVerified) {
         Write-Host 'The replacement passed post-cutover validation.' -ForegroundColor Green
         if ((Read-Host 'Open the guarded decommission checklist? Type YES or NO') -ceq 'YES') {
             Invoke-ToolkitStep 'Step-05-Decommission-OldServer.ps1'
+            $completion = Get-LatestFile -Folder $paths.Reports -Pattern "$computerName-Step05-Completion-*.json"
+            if ($completion) {
+                $completionResult = Get-Content -LiteralPath $completion.FullName -Raw | ConvertFrom-Json
+                if ($completionResult.Ready) {
+                    if (Complete-MigrationCleanup -State $state) { return }
+                }
+                else { Write-Host 'Cleanup is unavailable because the decommission checklist is not READY.' -ForegroundColor Yellow }
+            }
         }
         return
     }
@@ -100,6 +180,14 @@ if ($computerName -ieq $state.SourceServer) {
 
 $state.TargetServer = $computerName
 Save-State $state
+Write-Host "Bound migration domain: $($state.IntendedDomain)" -ForegroundColor Cyan
+$currentSystem = Get-CimInstance Win32_ComputerSystem
+if ($currentSystem.PartOfDomain -and $currentSystem.Domain -ine $state.IntendedDomain) {
+    Write-Host "This server is joined to the wrong domain: $($currentSystem.Domain)" -ForegroundColor Red
+    Write-Host "Migration is bound to: $($state.IntendedDomain)"
+    Stop-Wizard 'Stop. Do not continue until a senior technician reviews the incorrect domain membership.'
+    return
+}
 
 Show-Heading 'WORKLOAD SAFETY CLASSIFICATION'
 $special = @()

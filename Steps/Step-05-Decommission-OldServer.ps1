@@ -9,6 +9,7 @@ $paths = Initialize-ToolkitOutput -ProjectRoot $projectRoot
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $logFile = Join-Path $paths.Logs "Step-05-Decommission-OldServer_$stamp.log"
 $reportFile = Join-Path $paths.Reports "$env:COMPUTERNAME-Step05-DecommissionPlan-$stamp.txt"
+$completionFile = Join-Path $paths.Reports "$env:COMPUTERNAME-Step05-Completion-$stamp.json"
 
 $checks = [ordered]@{
     'Post-cutover validation has no unresolved FAIL results' = $false
@@ -64,6 +65,13 @@ $lines += '', 'MANUAL DECOMMISSION SEQUENCE',
     '6. Sanitize or dispose of storage according to organizational policy.'
 $lines | Set-Content -LiteralPath $reportFile -Encoding UTF8
 Write-ToolkitLog -Level 'PASS' -Message "Saved audit and decommission plan: $reportFile" -LogFile $logFile
+[PSCustomObject]@{
+    ComputerName=$env:COMPUTERNAME
+    Timestamp=(Get-Date).ToString('o')
+    Ready=[bool]$allChecksPassed
+    ValidationReport=if ($latestValidation) { $latestValidation.FullName } else { '' }
+    Checklist=$checks
+} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $completionFile -Encoding UTF8
 
 if ($Execute) {
     if (-not $allChecksPassed) {

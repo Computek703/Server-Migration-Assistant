@@ -21,6 +21,14 @@ Keep the complete repository together. Reports, exports, logs, and generated cop
 
 Choose **Start or Resume Migration** for normal use. The wizard stores progress in `Output\Migration-State.json`, detects whether it is running on the old or new server, and presents one safe checkpoint at a time. Rerun it after every restart or completed checkpoint. Individual phases are kept under **Troubleshooting Tools** and should normally be used only when the wizard directs you there.
 
+When the replacement is missing Windows roles or features, the toolkit creates a plain-language role installation plan. It can install low-risk prerequisites after typed confirmation, lists optional management tools separately, and routes AD DS, DNS, DHCP, Hyper-V, IIS, clustering, DFS, remote access, and similar workloads through guided or product-specific migration paths.
+
+For a domain-controller replacement, the wizard checks whether the existing domain can be discovered through internal DNS. After the technician types `JOIN DOMAIN` and supplies authorized credentials, it joins the replacement to the existing domain and restarts. Domain-controller promotion remains a separate checkpoint after the restart.
+
+Each migration is bound to the exact DNS domain—and, when available, its immutable domain GUID—from the old-server export. The technician must type that domain name exactly before the join. A mismatch between the export, saved flash-drive state, current membership, or typed domain stops the workflow; the toolkit never selects a nearby domain automatically.
+
+After successful post-cutover validation, the rollback monitoring period, and a fully passed decommission checklist, the wizard offers **Archive and Reset**. It requires the exact phrase `ARCHIVE AND RESET TOOLKIT`, creates a timestamped ZIP and SHA-256 checksum under `MigrationArchives`, verifies the archive, clears only the active `Output` contents, and recreates clean output folders for the next migration.
+
 ## Workflow
 
 1. Run Step 1 on the old server. Review the generated migration manifest to confirm what the server does, then copy the complete toolkit folder to the new server.
