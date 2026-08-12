@@ -19,7 +19,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Launchers\Start-Migrat
 
 Keep the complete repository together. Reports, exports, logs, and generated copy commands are written under `Output`.
 
-Choose **Guided Migration Wizard** unless you are troubleshooting a specific advanced step. The wizard stores progress in `Output\Migration-State.json`, detects whether it is running on the old or new server, and presents one safe checkpoint at a time. Rerun it after every restart or completed checkpoint.
+Choose **Start or Resume Migration** for normal use. The wizard stores progress in `Output\Migration-State.json`, detects whether it is running on the old or new server, and presents one safe checkpoint at a time. Rerun it after every restart or completed checkpoint. Individual phases are kept under **Troubleshooting Tools** and should normally be used only when the wizard directs you there.
 
 ## Workflow
 
