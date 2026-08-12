@@ -514,7 +514,44 @@ Invoke-SafeExport -Name 'IIS Inventory' -ScriptBlock {
 }
 
 # ------------------------------------------------------------
-# 18. Migration Manifest / Server Purpose Summary
+# 18. Hyper-V Inventory (no VM state changes)
+# ------------------------------------------------------------
+Invoke-SafeExport -Name 'Hyper-V Virtual Machine Inventory' -ScriptBlock {
+    if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue)) {
+        Write-Log INFO 'Hyper-V PowerShell cmdlets are unavailable; VM inventory skipped.'
+        return
+    }
+
+    $vmInventory = @(Get-VM -ErrorAction Stop | ForEach-Object {
+        $vm = $_
+        $drives = @(Get-VMHardDiskDrive -VM $vm -ErrorAction SilentlyContinue)
+        $adapters = @(Get-VMNetworkAdapter -VM $vm -ErrorAction SilentlyContinue)
+        [PSCustomObject]@{
+            Name                 = $vm.Name
+            Id                   = [string]$vm.Id
+            State                = [string]$vm.State
+            Generation           = $vm.Generation
+            Version              = [string]$vm.Version
+            ProcessorCount       = $vm.ProcessorCount
+            MemoryStartupBytes   = $vm.MemoryStartup
+            AutomaticStartAction = [string]$vm.AutomaticStartAction
+            AutomaticStopAction  = [string]$vm.AutomaticStopAction
+            ConfigurationLocation= $vm.ConfigurationLocation
+            CheckpointFileLocation = $vm.CheckpointFileLocation
+            SmartPagingFilePath  = $vm.SmartPagingFilePath
+            VhdPaths             = @($drives | Where-Object Path | Select-Object -ExpandProperty Path)
+            SwitchNames          = @($adapters | Where-Object SwitchName | Select-Object -ExpandProperty SwitchName -Unique)
+        }
+    })
+    $vmInventory | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ExportsRoot "$BaseName-HyperV-Inventory.json") -Encoding UTF8
+    $vmInventory | Select-Object Name,State,Generation,Version,ProcessorCount,MemoryStartupBytes,AutomaticStartAction,@{Name='VhdPaths';Expression={$_.VhdPaths -join '; '}},@{Name='SwitchNames';Expression={$_.SwitchNames -join '; '}} |
+        Export-Csv -LiteralPath (Join-Path $ExportsRoot "$BaseName-HyperV-Inventory.csv") -NoTypeInformation -Encoding UTF8
+    Write-Log PASS "Inventoried $($vmInventory.Count) Hyper-V virtual machine(s) without changing their state."
+    if ($vmInventory.Count) { Write-Log WARN 'VM data is not in this inventory. Use the guarded Hyper-V export action at the approved cutover.' }
+}
+
+# ------------------------------------------------------------
+# 19. Migration Manifest / Server Purpose Summary
 # ------------------------------------------------------------
 Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
     $installedFeatures = if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
@@ -537,7 +574,7 @@ Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
             [PSCustomObject]@{ RelativePath=$_.FullName.Substring($ProjectRoot.Length).TrimStart('\'); Length=$_.Length; SHA256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
         })
     $manifest = [ordered]@{
-        SchemaVersion     = 1
+        SchemaVersion     = 2
         ExportedAt        = (Get-Date).ToString('o')
         SourceComputer    = $ComputerName
         SourceDomain      = (Get-CimInstance Win32_ComputerSystem).Domain
@@ -556,12 +593,16 @@ Invoke-SafeExport -Name 'Migration Manifest' -ScriptBlock {
         } else { $null }
         InstalledFeatures = $installedFeatures
         PurposeSignals    = $purposeSignals
+        HyperVVirtualMachines = if (Get-Command Get-VM -ErrorAction SilentlyContinue) {
+            @(Get-VM -ErrorAction SilentlyContinue | Select-Object Name,@{Name='Id';Expression={[string]$_.Id}},@{Name='State';Expression={[string]$_.State}},Generation,@{Name='Version';Expression={[string]$_.Version}})
+        } else { @() }
         ExportHealth      = [ordered]@{ FailureCount=$script:FailureCount; WarningCount=$script:WarningCount; Complete=($script:FailureCount -eq 0) }
         Shares            = $serverShares
         Files             = $files
         Notes             = @(
             'A new server name is supported; review name-bound applications, certificates, SPNs, scheduled tasks, and UNC paths.',
-            'Domain controllers, SQL, Exchange, failover clusters, Hyper-V, and third-party applications require product-specific migration procedures.'
+            'Domain controllers, SQL, Exchange, failover clusters, and third-party applications require product-specific migration procedures.',
+            'Hyper-V VMs require a guarded export/import cutover. Inventory alone does not contain VM disks.'
         )
     }
     $manifestPath = Join-Path $ExportsRoot "$BaseName-MigrationManifest.json"

@@ -253,13 +253,17 @@ function Invoke-RoleInstallationGuide {
         '^DHCP$','^DNS$','^Web-','^NPAS$','^RemoteAccess$','^RDS-','^WDS$','^UpdateServices'
     )
     $optionalPatterns = @('^RSAT','^GPMC$','^PowerShell-ISE$','-Tools$','-PowerShell$')
-    $safe = @(); $special = @(); $optional = @(); $unavailable = @()
+    $safe = @(); $special = @(); $optional = @(); $optionalUnavailable = @(); $unavailable = @()
 
     foreach ($name in $missing) {
+        $isOptional = [bool]($optionalPatterns | Where-Object { $name -match $_ })
         $feature = $available | Where-Object Name -eq $name | Select-Object -First 1
+        if ($isOptional) {
+            if ($feature) { $optional += $feature } else { $optionalUnavailable += $name }
+            continue
+        }
         if (-not $feature) { $unavailable += $name; continue }
         if ($specialPatterns | Where-Object { $name -match $_ }) { $special += $feature; continue }
-        if ($optionalPatterns | Where-Object { $name -match $_ }) { $optional += $feature; continue }
         $safe += $feature
     }
 
@@ -279,7 +283,9 @@ function Invoke-RoleInstallationGuide {
         } else { $lines += '- None' }
         $lines += ''
     }
-    $lines += 'UNAVAILABLE ON THIS OPERATING SYSTEM'
+    $lines += 'OPTIONAL AND UNAVAILABLE ON THIS OPERATING SYSTEM'
+    $lines += $(if ($optionalUnavailable.Count) { @($optionalUnavailable | ForEach-Object { "- $_ (nonblocking)" }) } else { '- None' })
+    $lines += '', 'REQUIRED BUT UNAVAILABLE ON THIS OPERATING SYSTEM'
     $lines += $(if ($unavailable.Count) { @($unavailable | ForEach-Object { "- $_" }) } else { '- None' })
     $lines += '', 'Do not blindly install specialized roles. Their configuration and data require supported migration procedures.'
     $lines | Set-Content -LiteralPath $planPath -Encoding UTF8
@@ -289,7 +295,8 @@ function Invoke-RoleInstallationGuide {
     foreach ($feature in $safe) { Write-Host "  AUTO: $($feature.DisplayName) [$($feature.Name)]" -ForegroundColor Green }
     foreach ($feature in $special) { Write-Host "  GUIDED: $($feature.DisplayName) [$($feature.Name)]" -ForegroundColor Yellow }
     foreach ($feature in $optional) { Write-Host "  OPTIONAL: $($feature.DisplayName) [$($feature.Name)]" }
-    foreach ($name in $unavailable) { Write-Host "  UNAVAILABLE: $name" -ForegroundColor Red }
+    foreach ($name in $optionalUnavailable) { Write-Host "  OPTIONAL/UNAVAILABLE: $name (nonblocking)" }
+    foreach ($name in $unavailable) { Write-Host "  BLOCKING/UNAVAILABLE: $name" -ForegroundColor Red }
     Write-Log INFO "Role installation plan saved: $planPath"
 
     if ($safe.Count) {
@@ -308,7 +315,87 @@ function Invoke-RoleInstallationGuide {
         if ($toolResult.RestartNeeded -eq 'Yes') { Write-Log WARN 'A restart is required after management-tool installation.'; return $false }
     }
 
+    $missingHyperV = $special | Where-Object Name -eq 'Hyper-V' | Select-Object -First 1
+    if ($missingHyperV) {
+        Write-Host ''
+        Write-Host "BLOCKING ROLE: Hyper-V is installed on $($Manifest.SourceComputer) but missing on $ComputerName." -ForegroundColor Red
+        Write-Host 'Installing the role prepares the host; virtual machines still require inventory and a supported migration/copy plan.' -ForegroundColor Yellow
+        $hyperVAnswer = Read-Host 'Type INSTALL HYPER-V to install the role and management tools, or SKIP'
+        if ($hyperVAnswer -ceq 'INSTALL HYPER-V') {
+            $hyperVResult = Install-WindowsFeature -Name Hyper-V -IncludeManagementTools -ErrorAction Stop
+            Write-Log PASS "Hyper-V installation result: $($hyperVResult.Success); restart needed: $($hyperVResult.RestartNeeded)"
+            Write-Log WARN 'Restart the server, rerun Step 2, then Start or Resume Migration.'
+            return $false
+        }
+        Write-Log FAIL 'Hyper-V installation was skipped. Full migration cannot continue while this source runtime role is missing.'
+    }
+
     return (-not $special.Count -and -not $unavailable.Count)
+}
+
+function Invoke-HyperVImportGuide {
+    param([Parameter(Mandatory)][object]$Manifest)
+
+    $expected = @($Manifest.HyperVVirtualMachines | Where-Object Name)
+    if (-not $expected.Count) { return @() }
+    if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue) -or -not (Get-Command Import-VM -ErrorAction SilentlyContinue)) {
+        return @(New-Result -Category 'Hyper-V' -Action 'VM Import' -Status 'FAIL' -Details 'Hyper-V cmdlets are unavailable on the new server.' -Recommendation 'Install Hyper-V, restart, rerun Step 2, and resume Step 3.')
+    }
+
+    Write-Section 'Hyper-V Virtual Machine Import'
+    Write-Host "The old-server inventory expects $($expected.Count) VM(s): $($expected.Name -join ', ')" -ForegroundColor Yellow
+    $existing = @(Get-VM -ErrorAction SilentlyContinue)
+    $missing = @($expected | Where-Object { $_.Name -notin @($existing.Name) })
+    if (-not $missing.Count) {
+        Write-Log PASS 'Every inventoried VM is already registered on this Hyper-V host.'
+        return @(New-Result -Category 'Hyper-V' -Action 'VM Import' -Status 'PASS' -Details 'All inventoried VMs are registered on the new host.')
+    }
+
+    Write-Host "VMs not yet registered: $($missing.Name -join ', ')" -ForegroundColor Red
+    $receipt = Get-LatestExportFile -Pattern '*HyperV-ExportReceipt-*.json'
+    if ($receipt) {
+        $receiptData = @(Get-Content -LiteralPath $receipt.FullName -Raw | ConvertFrom-Json)
+        $suggestedPath = @($receiptData | Where-Object Status -eq 'Exported' | Select-Object -First 1 -ExpandProperty Destination)
+        if ($suggestedPath) { Write-Host "Export receipt path (drive letters can change): $suggestedPath" }
+    }
+    $exportRoot = Read-Host 'Enter the folder containing the copied VM exports, or type SKIP'
+    if ($exportRoot -ceq 'SKIP') {
+        return @(New-Result -Category 'Hyper-V' -Action 'VM Import' -Status 'FAIL' -Details "VM import skipped; missing: $($missing.Name -join ', ')" -Recommendation 'Copy the complete VM export folder to final storage and rerun Step 3.')
+    }
+    if (-not (Test-Path -LiteralPath $exportRoot -PathType Container)) {
+        return @(New-Result -Category 'Hyper-V' -Action 'VM Import' -Status 'FAIL' -Details "VM export folder was not found: $exportRoot" -Recommendation 'Connect the export disk or enter the correct full path.')
+    }
+
+    $configs = @(Get-ChildItem -LiteralPath $exportRoot -Filter *.vmcx -File -Recurse -ErrorAction Stop)
+    if (-not $configs.Count) {
+        return @(New-Result -Category 'Hyper-V' -Action 'VM Import' -Status 'FAIL' -Details "No .vmcx configuration files were found under $exportRoot" -Recommendation 'Use the root of a complete Export-VM package.')
+    }
+    Write-Host "Found $($configs.Count) VM configuration package(s). Import uses COPY so the export package remains intact." -ForegroundColor Yellow
+    Write-Host 'Imported VMs will remain OFF. The script will not connect them to a replacement switch or start them automatically.'
+    if ((Read-Host 'Type IMPORT VMS to copy and register the packages, or SKIP') -cne 'IMPORT VMS') {
+        return @(New-Result -Category 'Hyper-V' -Action 'VM Import' -Status 'FAIL' -Details 'VM packages found, but import was not approved.' -Recommendation 'Rerun Step 3 when the import is approved.')
+    }
+
+    $importResults = @()
+    foreach ($config in $configs) {
+        try {
+            $imported = Import-VM -Path $config.FullName -Copy -ErrorAction Stop
+            if ($imported.State -ne 'Off') { throw "Imported VM state is $($imported.State), not Off. The script refused to force it off." }
+            Write-Log PASS "Imported and left off: $($imported.Name)"
+            $importResults += New-Result -Category 'Hyper-V' -Action "Import $($imported.Name)" -Status 'PASS' -Details "Registered from $($config.FullName); State=Off"
+        }
+        catch {
+            Write-Log FAIL "Import failed for $($config.FullName): $($_.Exception.Message)"
+            $importResults += New-Result -Category 'Hyper-V' -Action "Import $($config.Directory.Parent.Name)" -Status 'FAIL' -Details $_.Exception.Message -Recommendation 'Check VM configuration-version support, available storage, and matching virtual-switch names. Use Compare-VM for reported incompatibilities.'
+        }
+    }
+    $stillMissing = @($expected | Where-Object { $_.Name -notin @((Get-VM -ErrorAction SilentlyContinue).Name) })
+    if ($stillMissing.Count) {
+        $importResults += New-Result -Category 'Hyper-V' -Action 'Expected VM verification' -Status 'FAIL' -Details "Still missing: $($stillMissing.Name -join ', ')" -Recommendation 'Do not decommission the old host.'
+    } else {
+        $importResults += New-Result -Category 'Hyper-V' -Action 'Expected VM verification' -Status 'PASS' -Details 'Every inventoried VM is registered and remains available for controlled startup testing.'
+    }
+    return $importResults
 }
 
 function Invoke-DomainControllerMigrationGuide {
@@ -603,7 +690,7 @@ if (-not (Test-IsAdmin)) {
     return
 }
 
-Write-Host 'Step 3 can change DHCP, DNS, and SMB configuration on this server.' -ForegroundColor Yellow
+Write-Host 'Step 3 can change DHCP, DNS, SMB, and Hyper-V configuration on this server.' -ForegroundColor Yellow
 $targetConfirmation = Read-Host "Type this NEW server name to continue: $ComputerName"
 if ($targetConfirmation -cne $ComputerName) {
     Write-Log WARN 'Target server confirmation did not match. Migration cancelled.'
@@ -658,8 +745,8 @@ if ($manifestFile) {
             return
         }
         if (-not $roleReady) {
-            Write-Log FAIL 'Migration blocked: one or more specialized source roles still require a completed migration plan.'
-            Write-Log WARN 'Review the role installation plan before continuing with file migration.'
+            Write-Log FAIL 'Migration paused because the required role plan is incomplete. Review the BLOCKING ROLE or BLOCKING/UNAVAILABLE message above.'
+            Write-Log WARN 'Complete the stated role action, restart if requested, rerun Step 2, and then resume the wizard.'
             Read-Host 'Press Enter to return to launcher'
             return
         }
@@ -672,6 +759,7 @@ if ($manifestFile) {
 }
 
 Write-Section 'Migration Source Info'
+if ($manifest) { $results += Invoke-HyperVImportGuide -Manifest $manifest }
 $OldServerName = Read-Host 'Enter the OLD server name used for Robocopy/share references'
 if (-not $OldServerName) {
     Write-Log WARN 'No old server name entered. Robocopy command generation will be skipped.'

@@ -93,6 +93,26 @@ if ($manifest -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue
     }
 }
 
+if ($manifest -and @($manifest.HyperVVirtualMachines).Count) {
+    if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue)) {
+        Add-Check 'Hyper-V' 'VM inventory' 'FAIL' 'Hyper-V cmdlets are unavailable on the replacement server.'
+    }
+    else {
+        $actualVms = @(Get-VM -ErrorAction SilentlyContinue)
+        foreach ($expectedVm in @($manifest.HyperVVirtualMachines)) {
+            $actualVm = $actualVms | Where-Object Name -eq $expectedVm.Name | Select-Object -First 1
+            if (-not $actualVm) {
+                Add-Check 'Hyper-V' "Expected VM $($expectedVm.Name)" 'FAIL' 'VM is not registered on the replacement host.'
+                continue
+            }
+            $adapters = @(Get-VMNetworkAdapter -VM $actualVm -ErrorAction SilentlyContinue)
+            $disconnected = @($adapters | Where-Object { -not $_.SwitchName })
+            $status = if ($disconnected.Count) { 'WARN' } else { 'PASS' }
+            Add-Check 'Hyper-V' "Expected VM $($expectedVm.Name)" $status "State=$($actualVm.State); Generation=$($actualVm.Generation); Version=$($actualVm.Version); DisconnectedAdapters=$($disconnected.Count)"
+        }
+    }
+}
+
 try {
     $recentErrors = @(Get-WinEvent -FilterHashtable @{LogName=@('System','Application');Level=1,2;StartTime=(Get-Date).AddHours(-24)} -MaxEvents 100 -ErrorAction Stop)
     Add-Check 'Event Logs' 'Critical/errors (24h)' $(if ($recentErrors.Count) {'WARN'} else {'PASS'}) "$($recentErrors.Count) event(s), capped at 100"

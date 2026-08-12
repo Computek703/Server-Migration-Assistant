@@ -344,7 +344,7 @@ try {
             $hasDns    = [bool]($dnsInfo.ServerAddresses)
 
             $status = if ($hasStatic -and $hasDns) { 'PASS' } else { 'WARN' }
-            $detail = "Adapter=$($adapter.InterfaceAlias) | IP=$($adapter.IPv4Address.IPAddress -join ', ') | GW=$($adapter.IPv4DefaultGateway.NextHop -join ', ') | DNS=$($dnsInfo.ServerAddresses -join ', ')"
+            $detail = "Adapter=$($adapter.InterfaceAlias) | IP=$($adapter.IPv4Address.IPAddress -join ', ') | AddressSource=$($ipv4Info.PrefixOrigin -join ', ') | GW=$($adapter.IPv4DefaultGateway.NextHop -join ', ') | DNS=$($dnsInfo.ServerAddresses -join ', ')"
             $rec    = if ($status -eq 'WARN') { 'Set static IP, subnet, gateway, and DNS correctly before cutover.' } else { '' }
 
             $results += New-Result -Category 'Network' -Check "Adapter $($adapter.InterfaceAlias)" -Status $status -Details $detail -Recommendation $rec
@@ -414,7 +414,7 @@ catch {
 Write-Section 'Storage'
 
 try {
-    $volumes = Get-Volume | Where-Object { $_.DriveLetter }
+    $volumes = Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveType -eq 'Fixed' }
     foreach ($volume in $volumes) {
         $freePct = if ($volume.Size -gt 0) { [math]::Round(($volume.SizeRemaining / $volume.Size) * 100,2) } else { 0 }
         $status = if ($freePct -ge 15) { 'PASS' } else { 'WARN' }

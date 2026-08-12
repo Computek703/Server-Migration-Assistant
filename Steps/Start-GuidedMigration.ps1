@@ -171,6 +171,15 @@ if ($computerName -ieq $state.SourceServer) {
         return
     }
     Write-Host 'The export package already identifies this computer as the old server.'
+    if ($manifest.PurposeSignals.HyperV -and @($manifest.HyperVVirtualMachines).Count) {
+        Write-Host "Hyper-V inventory contains $(@($manifest.HyperVVirtualMachines).Count) VM(s)." -ForegroundColor Yellow
+        Write-Host 'VM export is an outage/cutover action and is kept separate from discovery.'
+        if ((Read-Host 'Export selected VMs now? Type EXPORT VMS or NO') -ceq 'EXPORT VMS') {
+            Invoke-ToolkitStep 'Step-01B-Export-HyperVVMs.ps1'
+            Stop-Wizard 'Move the toolkit and the complete VM export folder to the new Hyper-V host, then resume the wizard.'
+            return
+        }
+    }
     if ((Read-Host 'Refresh Step 1 before continuing? Type YES or NO') -ceq 'YES') {
         Invoke-ToolkitStep 'Step-01-Export-OldServer.ps1'
     }
@@ -240,7 +249,7 @@ $step3 = Get-LatestFile -Folder $paths.Reports -Pattern "$computerName-Step03-*-
 if (-not $step3) {
     Show-Heading 'CHECKPOINT 3 OF 7 - PREPARE ROLES, SETTINGS, AND COPY JOBS'
     Invoke-ToolkitStep 'Step-03-MigrateSettings.ps1'
-    Stop-Wizard 'Resolve Step 3 failures and review the generated initial/final Robocopy scripts.'
+    Stop-Wizard 'Step 3 may have paused for a missing role or required restart. Follow its final BLOCKING ROLE/NEXT ACTION message, rerun Step 2 after changes, then resume the wizard.'
     return
 }
 
